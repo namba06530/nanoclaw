@@ -792,10 +792,29 @@ export async function runAgentEngine(
   }
 
   try {
+    // Pass image as raw base64 string (no "data:" prefix).
+    // - Uint8Array/Buffer → SDK stores as Uint8Array → Ollama provider serializes as JSON object ✗
+    // - "data:..." URL string → SDK sees a valid URL → tries to download it → DownloadError ✗
+    // - Raw base64 string → new URL() throws → SDK stores as plain string → provider sends
+    //   images:["base64string"] to Ollama ✓
+    const userMessage = input.imageBase64
+      ? {
+          role: 'user' as const,
+          content: [
+            { type: 'text' as const, text: input.prompt },
+            {
+              type: 'image' as const,
+              image: input.imageBase64,
+              mimeType: (input.imageMimeType ?? 'image/jpeg') as any,
+            },
+          ],
+        }
+      : { role: 'user' as const, content: input.prompt };
+
     const result = await generateText({
       model: ollama(currentModel),
       system: systemPrompt,
-      messages: [...history, { role: 'user', content: input.prompt }],
+      messages: [...history, userMessage],
       tools,
       stopWhen: stepCountIs(MAX_STEPS),
       onStepFinish: async (step) => {

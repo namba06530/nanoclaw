@@ -22,6 +22,8 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  imageBase64?: string;
+  imageMimeType?: string;
 }
 
 export interface ContainerOutput {

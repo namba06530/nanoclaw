@@ -209,6 +209,56 @@ export class WhatsAppChannel implements Channel {
             const senderName = msg.pushName || sender.split('@')[0];
             const fromMe = msg.key.fromMe || false;
 
+            // Handle image attachments — download and pass as base64 for vision
+            const imgMsg =
+              normalized.imageMessage ??
+              (msg.message as any)?.imageMessage;
+            if (imgMsg) {
+              const fileSize = (imgMsg.fileLength as number) || 0;
+              const MAX_IMG_SIZE = 10 * 1024 * 1024; // 10 MB
+              const caption = imgMsg.caption || '';
+              let imageBase64: string | undefined;
+              const imageMimeType: string = imgMsg.mimetype || 'image/jpeg';
+
+              if (fileSize <= MAX_IMG_SIZE) {
+                try {
+                  const buffer = (await downloadMediaMessage(
+                    { key: msg.key, message: msg.message },
+                    'buffer',
+                    {},
+                  )) as Buffer;
+                  imageBase64 = buffer.toString('base64');
+                  logger.info(
+                    { mimeType: imageMimeType, bytes: buffer.length },
+                    'WhatsApp image downloaded',
+                  );
+                } catch (err: any) {
+                  logger.warn(
+                    { err: err.message },
+                    'WhatsApp image download failed',
+                  );
+                }
+              } else {
+                logger.info(
+                  { fileSize },
+                  'WhatsApp image too large, skipping download',
+                );
+              }
+
+              this.opts.onMessage(chatJid, {
+                id: msg.key.id || '',
+                chat_jid: chatJid,
+                sender,
+                sender_name: senderName,
+                content: caption || '[Image]',
+                timestamp,
+                is_from_me: fromMe,
+                imageBase64,
+                imageMimeType,
+              });
+              continue;
+            }
+
             // Handle document attachments
             // normalizeMessageContent doesn't always expose documentMessage at top level
             // so we check both normalized and the raw message

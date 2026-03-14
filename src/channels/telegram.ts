@@ -194,7 +194,67 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const photos = ctx.message.photo;
+      const largest = photos[photos.length - 1];
+      const MAX_IMG_SIZE = 10 * 1024 * 1024; // 10 MB
+      const caption = ctx.message.caption || '';
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+
+      if ((largest.file_size || 0) > MAX_IMG_SIZE) {
+        this.opts.onMessage(chatJid, {
+          id: ctx.message.message_id.toString(),
+          chat_jid: chatJid,
+          sender: ctx.from?.id?.toString() || '',
+          sender_name: senderName,
+          content: '[Image trop volumineuse pour être analysée]',
+          timestamp,
+          is_from_me: false,
+        });
+        return;
+      }
+
+      let imageBase64: string | undefined;
+      const imageMimeType = 'image/jpeg';
+      try {
+        const file = await ctx.getFile();
+        const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+        const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        imageBase64 = buffer.toString('base64');
+        logger.info(
+          { bytes: buffer.length },
+          'Telegram photo downloaded',
+        );
+      } catch (err: any) {
+        logger.warn({ err: err.message }, 'Telegram photo download failed');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content: caption || '[Image]',
+        timestamp,
+        is_from_me: false,
+        imageBase64,
+        imageMimeType,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
