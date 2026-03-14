@@ -6,11 +6,13 @@ import makeWASocket, {
   Browsers,
   DisconnectReason,
   WASocket,
+  downloadMediaMessage,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
+import { extractTextFromBuffer } from '../document-extractor.js';
 
 import {
   ASSISTANT_HAS_OWN_NUMBER,
@@ -203,6 +205,59 @@ export class WhatsAppChannel implements Channel {
           // Only deliver full message for registered groups
           const groups = this.opts.registeredGroups();
           if (groups[chatJid]) {
+            const sender = msg.key.participant || msg.key.remoteJid || '';
+            const senderName = msg.pushName || sender.split('@')[0];
+            const fromMe = msg.key.fromMe || false;
+
+            // Handle document attachments
+            const docMsg = normalized.documentMessage;
+            if (docMsg) {
+              const name = docMsg.fileName || 'fichier';
+              const mimeType = docMsg.mimetype || '';
+              const fileSize = (docMsg.fileLength as number) || 0;
+              const MAX_FILE_SIZE = 20 * 1024 * 1024;
+              let docContent = `[Document: ${name}]`;
+
+              if (fileSize <= MAX_FILE_SIZE) {
+                try {
+                  const buffer = (await downloadMediaMessage(
+                    { key: msg.key, message: msg.message },
+                    'buffer',
+                    {},
+                  )) as Buffer;
+                  const extracted = await extractTextFromBuffer(
+                    buffer,
+                    mimeType,
+                    name,
+                  );
+                  docContent = `[Document: ${name}]\n\n--- Contenu ---\n${extracted}\n--- Fin ---`;
+                  logger.info(
+                    { name, mimeType, chars: extracted.length },
+                    'WhatsApp document extracted',
+                  );
+                } catch (err: any) {
+                  logger.warn(
+                    { name, err: err.message },
+                    'WhatsApp document extraction failed',
+                  );
+                  docContent = `[Document: ${name}] (erreur de téléchargement: ${err.message})`;
+                }
+              } else {
+                docContent = `[Document: ${name}] (fichier trop volumineux pour être analysé)`;
+              }
+
+              this.opts.onMessage(chatJid, {
+                id: msg.key.id || '',
+                chat_jid: chatJid,
+                sender,
+                sender_name: senderName,
+                content: docContent,
+                timestamp,
+                is_from_me: fromMe,
+              });
+              continue;
+            }
+
             const content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
@@ -213,10 +268,6 @@ export class WhatsAppChannel implements Channel {
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
             if (!content) continue;
 
-            const sender = msg.key.participant || msg.key.remoteJid || '';
-            const senderName = msg.pushName || sender.split('@')[0];
-
-            const fromMe = msg.key.fromMe || false;
             // Detect bot messages: with own number, fromMe is reliable
             // since only the bot sends from that number.
             // With shared number, bot messages carry the assistant name prefix

@@ -2,6 +2,7 @@ import https from 'https';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { extractTextFromBuffer } from '../document-extractor.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -197,9 +198,30 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+    this.bot.on('message:document', async (ctx) => {
+      const doc = ctx.message.document;
+      const name = doc?.file_name || 'fichier';
+      const mimeType = doc?.mime_type || '';
+      const fileSize = doc?.file_size || 0;
+      const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
+
+      if (fileSize > MAX_FILE_SIZE) {
+        storeNonText(ctx, `[Document: ${name}] (fichier trop volumineux pour être analysé)`);
+        return;
+      }
+
+      try {
+        const file = await ctx.getFile();
+        const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+        const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        const extracted = await extractTextFromBuffer(buffer, mimeType, name);
+        storeNonText(ctx, `[Document: ${name}]\n\n--- Contenu ---\n${extracted}\n--- Fin ---`);
+        logger.info({ name, mimeType, chars: extracted.length }, 'Document extracted');
+      } catch (err: any) {
+        logger.warn({ name, err: err.message }, 'Document extraction failed');
+        storeNonText(ctx, `[Document: ${name}] (erreur de téléchargement: ${err.message})`);
+      }
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
