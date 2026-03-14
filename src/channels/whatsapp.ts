@@ -234,7 +234,7 @@ export class WhatsAppChannel implements Channel {
                     mimeType,
                     name,
                   );
-                  docContent = `[Document: ${name}]\n\n--- Contenu ---\n${extracted}\n--- Fin ---`;
+                  docContent = `Fichier joint "${name}" :\n\n${extracted}`;
                   logger.info(
                     { name, mimeType, chars: extracted.length },
                     'WhatsApp document extracted',

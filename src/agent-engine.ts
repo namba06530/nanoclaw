@@ -250,7 +250,11 @@ function buildSystemPrompt(
       '## CRITICAL: Tool Usage\n' +
       'You MUST use your tools to perform actions. NEVER pretend to have performed an action without calling the appropriate tool. ' +
       'Every email send requires a gmailSend tool call. Every file read requires a readFile tool call. ' +
-      'If a user asks you to do something and you have a tool for it, you MUST call the tool — do NOT simulate or hallucinate the result.',
+      'If a user asks you to do something and you have a tool for it, you MUST call the tool — do NOT simulate or hallucinate the result.\n\n' +
+      '## Fichiers joints\n' +
+      'Quand un message commence par `Fichier joint "nom" :`, le contenu du fichier a déjà été extrait et t\'est fourni directement dans le message. ' +
+      'Lis et utilise ce contenu directement — pas besoin d\'outil. ' +
+      'Si le contenu dit "[PDF scanné ...]", informe l\'utilisateur que l\'OCR n\'est pas disponible pour ce document scanné.',
   );
 
   return parts.join('\n');

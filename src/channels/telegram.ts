@@ -206,7 +206,10 @@ export class TelegramChannel implements Channel {
       const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
 
       if (fileSize > MAX_FILE_SIZE) {
-        storeNonText(ctx, `[Document: ${name}] (fichier trop volumineux pour être analysé)`);
+        storeNonText(
+          ctx,
+          `[Document: ${name}] (fichier trop volumineux pour être analysé)`,
+        );
         return;
       }
 
@@ -216,11 +219,20 @@ export class TelegramChannel implements Channel {
         const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
         const buffer = Buffer.from(await resp.arrayBuffer());
         const extracted = await extractTextFromBuffer(buffer, mimeType, name);
-        storeNonText(ctx, `[Document: ${name}]\n\n--- Contenu ---\n${extracted}\n--- Fin ---`);
-        logger.info({ name, mimeType, chars: extracted.length }, 'Document extracted');
+        storeNonText(
+          ctx,
+          `Fichier joint "${name}" :\n\n${extracted}`,
+        );
+        logger.info(
+          { name, mimeType, chars: extracted.length },
+          'Document extracted',
+        );
       } catch (err: any) {
         logger.warn({ name, err: err.message }, 'Document extraction failed');
-        storeNonText(ctx, `[Document: ${name}] (erreur de téléchargement: ${err.message})`);
+        storeNonText(
+          ctx,
+          `[Document: ${name}] (erreur de téléchargement: ${err.message})`,
+        );
       }
     });
     this.bot.on('message:sticker', (ctx) => {

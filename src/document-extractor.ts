@@ -1,12 +1,7 @@
-import { createRequire } from 'module';
-
 import mammoth from 'mammoth';
+import { PDFParse } from 'pdf-parse';
 
-const require = createRequire(import.meta.url);
-// pdf-parse has no ESM default export — use require
-const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ text: string }>;
-
-const MAX_CHARS = 20_000;
+const MAX_CHARS = 100_000;
 
 export async function extractTextFromBuffer(
   buffer: Buffer,
@@ -17,8 +12,10 @@ export async function extractTextFromBuffer(
     let text = '';
 
     if (mimeType === 'application/pdf' || filename.endsWith('.pdf')) {
-      const data = await pdfParse(buffer);
-      text = data.text;
+      const parser = new PDFParse({ data: new Uint8Array(buffer), verbosity: 0 });
+      await (parser as any).load();
+      const result = await parser.getText();
+      text = result.text;
     } else if (
       mimeType ===
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
@@ -36,6 +33,15 @@ export async function extractTextFromBuffer(
     }
 
     text = text.trim();
+
+    // Detect scanned PDF: no text layer extracted
+    if (
+      (mimeType === 'application/pdf' || filename.endsWith('.pdf')) &&
+      text.length < 100
+    ) {
+      return '[PDF scanné : ce document contient des images de texte, non du texte numérique. Aucun contenu extractible sans OCR.]';
+    }
+
     if (text.length > MAX_CHARS) {
       return (
         text.slice(0, MAX_CHARS) +
