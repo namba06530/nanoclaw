@@ -210,7 +210,11 @@ export class WhatsAppChannel implements Channel {
             const fromMe = msg.key.fromMe || false;
 
             // Handle document attachments
-            const docMsg = normalized.documentMessage;
+            // normalizeMessageContent doesn't always expose documentMessage at top level
+            // so we check both normalized and the raw message
+            const docMsg =
+              normalized.documentMessage ??
+              (msg.message as any)?.documentMessage;
             if (docMsg) {
               const name = docMsg.fileName || 'fichier';
               const mimeType = docMsg.mimetype || '';
