@@ -7,30 +7,14 @@
 </p>
 
 <p align="center">
-  <a href="https://nanoclaw.dev">nanoclaw.dev</a>&nbsp; • &nbsp;
   <a href="README_zh.md">中文</a>&nbsp; • &nbsp;
-  <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
-  <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="34.9k tokens, 17% of context window" valign="middle"></a>
+  <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>
 </p>
 
----
-
-<h2 align="center">🐳 Now Runs in Docker Sandboxes</h2>
-<p align="center">Every agent gets its own isolated container inside a micro VM.<br>Hypervisor-level isolation. Millisecond startup. No complex setup.</p>
-
-**macOS (Apple Silicon)**
-```bash
-curl -fsSL https://nanoclaw.dev/install-docker-sandboxes.sh | bash
-```
-
-**Windows (WSL)**
-```bash
-curl -fsSL https://nanoclaw.dev/install-docker-sandboxes-windows.sh | bash
-```
-
-> Currently supported on macOS (Apple Silicon) and Windows (x86). Linux support coming soon.
-
-<p align="center"><a href="https://nanoclaw.dev/blog/nanoclaw-docker-sandboxes">Read the announcement →</a>&nbsp; · &nbsp;<a href="docs/docker-sandboxes.md">Manual setup guide →</a></p>
+> **This is a personal fork** of [qwibitai/nanoclaw](https://github.com/qwibitai/nanoclaw).
+> Core changes: replaced the Claude Agent SDK with **Ollama** (local GPU inference via Vercel AI SDK),
+> added native Gmail tools, PDF/DOCX document extraction, and runtime model switching.
+> The agent runs entirely locally — no Anthropic API required.
 
 ---
 
@@ -79,7 +63,7 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 **Skills over features.** Instead of adding features (e.g. support for Telegram) to the codebase, contributors submit [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
 
-**Best harness, best model.** NanoClaw runs on the Claude Agent SDK, which means you're running Claude Code directly. Claude Code is highly capable and its coding and problem-solving capabilities allow it to modify and expand NanoClaw and tailor it to each user.
+**Best harness, best model.** This fork runs on **Ollama** via the Vercel AI SDK — any local model with GPU acceleration, no cloud API required. The codebase is small enough that Claude Code can safely modify and extend it.
 
 ## What It Supports
 
@@ -88,9 +72,12 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Main channel** - Your private channel (self-chat) for admin control; every group is completely isolated
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
 - **Web access** - Search and fetch content from the Web
-- **Container isolation** - Agents are sandboxed in [Docker Sandboxes](https://nanoclaw.dev/blog/nanoclaw-docker-sandboxes) (micro VM isolation), Apple Container (macOS), or Docker (macOS/Linux)
+- **Container isolation** - Agents run in isolated Docker containers (macOS/Linux)
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks
-- **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
+- **Local LLM inference** - Powered by [Ollama](https://ollama.ai) (Vercel AI SDK), runs entirely on your GPU. No Anthropic API key needed.
+- **Gmail integration** - Read, search and send emails directly from the agent
+- **Document analysis** - Send PDF, DOCX, or TXT files via Telegram or WhatsApp; the agent reads and analyzes them
+- **Runtime model switching** - Change the Ollama model without restarting (`setModel` tool)
 
 ## Usage
 
@@ -186,21 +173,11 @@ Agents run in containers, not behind application-level permission checks. They c
 
 We don't want configuration sprawl. Every user should customize NanoClaw so that the code does exactly what they want, rather than configuring a generic system. If you prefer having config files, you can tell Claude to add them.
 
-**Can I use third-party or open-source models?**
+**Can I use open-source models?**
 
-Yes. NanoClaw supports any Claude API-compatible model endpoint. Set these environment variables in your `.env` file:
+This fork runs **natively on [Ollama](https://ollama.ai)**. Set `OLLAMA_MODEL` and `OLLAMA_BASE_URL` in your `.env` file. No Anthropic API key is required. Any model available in Ollama works (llama3, mistral, kimi, gemma, etc.).
 
-```bash
-ANTHROPIC_BASE_URL=https://your-api-endpoint.com
-ANTHROPIC_AUTH_TOKEN=your-token-here
-```
-
-This allows you to use:
-- Local models via [Ollama](https://ollama.ai) with an API proxy
-- Open-source models hosted on [Together AI](https://together.ai), [Fireworks](https://fireworks.ai), etc.
-- Custom model deployments with Anthropic-compatible APIs
-
-Note: The model must support the Anthropic API format for best compatibility.
+You can switch model at runtime by asking the agent: `@Andy switch to llama3.2`.
 
 **How do I debug issues?**
 
