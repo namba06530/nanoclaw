@@ -219,10 +219,7 @@ export class TelegramChannel implements Channel {
         const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
         const buffer = Buffer.from(await resp.arrayBuffer());
         const extracted = await extractTextFromBuffer(buffer, mimeType, name);
-        storeNonText(
-          ctx,
-          `Fichier joint "${name}" :\n\n${extracted}`,
-        );
+        storeNonText(ctx, `Fichier joint "${name}" :\n\n${extracted}`);
         logger.info(
           { name, mimeType, chars: extracted.length },
           'Document extracted',

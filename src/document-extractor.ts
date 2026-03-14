@@ -12,7 +12,10 @@ export async function extractTextFromBuffer(
     let text = '';
 
     if (mimeType === 'application/pdf' || filename.endsWith('.pdf')) {
-      const parser = new PDFParse({ data: new Uint8Array(buffer), verbosity: 0 });
+      const parser = new PDFParse({
+        data: new Uint8Array(buffer),
+        verbosity: 0,
+      });
       await (parser as any).load();
       const result = await parser.getText();
       text = result.text;
