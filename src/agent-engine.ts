@@ -7,8 +7,11 @@
  */
 import { exec as execCallback, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
+
+import { google } from 'googleapis';
 
 import { generateText, stepCountIs, tool } from 'ai';
 import { createOllama } from 'ollama-ai-provider-v2';
@@ -44,6 +47,44 @@ let currentModel = OLLAMA_MODEL;
 
 const MAX_STEPS = AGENT_MAX_STEPS;
 const BASH_TIMEOUT_MS = 30_000;
+
+// ─── Gmail helper ─────────────────────────────────────────────────────────────
+
+// Singleton — one client per process to avoid token refresh conflicts
+let _gmailClient: ReturnType<typeof google.gmail> | null = null;
+
+function createGmailClient() {
+  if (_gmailClient) return _gmailClient;
+
+  const credDir = path.join(os.homedir(), '.gmail-mcp');
+  const keysPath = path.join(credDir, 'gcp-oauth.keys.json');
+  const tokensPath = path.join(credDir, 'credentials.json');
+
+  if (!fs.existsSync(keysPath) || !fs.existsSync(tokensPath)) return null;
+
+  const keys = JSON.parse(fs.readFileSync(keysPath, 'utf-8'));
+  const tokens = JSON.parse(fs.readFileSync(tokensPath, 'utf-8'));
+  const cfg = keys.installed || keys.web || keys;
+
+  const auth = new google.auth.OAuth2(
+    cfg.client_id,
+    cfg.client_secret,
+    cfg.redirect_uris?.[0],
+  );
+  auth.setCredentials(tokens);
+
+  // Persist refreshed tokens automatically
+  auth.on('tokens', (newTokens) => {
+    try {
+      const current = JSON.parse(fs.readFileSync(tokensPath, 'utf-8'));
+      Object.assign(current, newTokens);
+      fs.writeFileSync(tokensPath, JSON.stringify(current, null, 2));
+    } catch {}
+  });
+
+  _gmailClient = google.gmail({ version: 'v1', auth });
+  return _gmailClient;
+}
 
 // Persistent sandbox container per group (started once, reused across messages)
 const sandboxContainers = new Map<string, string>();
@@ -200,12 +241,16 @@ function buildSystemPrompt(
     parts.push('\n\n## Available Groups\n' + JSON.stringify(groups, null, 2));
   }
 
-  // Instructions for brevity (local models tend to be verbose)
+  // Instructions for brevity and tool usage
   parts.push(
     '\n\n## Response Instructions\n' +
       'Be concise. Use the language of the user. ' +
       'Do not add unnecessary disclaimers or repetition. ' +
-      'For messaging apps: keep responses short unless detail is explicitly requested.',
+      'For messaging apps: keep responses short unless detail is explicitly requested.\n\n' +
+      '## CRITICAL: Tool Usage\n' +
+      'You MUST use your tools to perform actions. NEVER pretend to have performed an action without calling the appropriate tool. ' +
+      'Every email send requires a gmailSend tool call. Every file read requires a readFile tool call. ' +
+      'If a user asks you to do something and you have a tool for it, you MUST call the tool — do NOT simulate or hallucinate the result.',
   );
 
   return parts.join('\n');
@@ -495,6 +540,144 @@ function buildTools(
       },
     }),
 
+    gmailSearch: tool({
+      description:
+        'Search or list Gmail emails. Returns a list with sender, subject, date and snippet. Use Gmail search syntax for the query (e.g. "is:unread", "from:boss@company.com", "subject:invoice").',
+      inputSchema: z.object({
+        query: z
+          .string()
+          .default('in:inbox')
+          .describe('Gmail search query. Default: "in:inbox"'),
+        maxResults: z.number().default(10).describe('Max number of results'),
+      }),
+      execute: async ({ query, maxResults }) => {
+        const gmail = createGmailClient();
+        if (!gmail) return { error: 'Gmail not configured' };
+        try {
+          const list = await gmail.users.messages.list({
+            userId: 'me',
+            q: query,
+            maxResults,
+          });
+          const messages = list.data.messages || [];
+          if (messages.length === 0) return { results: [] };
+
+          const results = await Promise.all(
+            messages.map(async (m) => {
+              const msg = await gmail.users.messages.get({
+                userId: 'me',
+                id: m.id!,
+                format: 'metadata',
+                metadataHeaders: ['From', 'Subject', 'Date'],
+              });
+              const h = (name: string) =>
+                msg.data.payload?.headers?.find(
+                  (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
+                )?.value || '';
+              return {
+                id: m.id,
+                from: h('From'),
+                subject: h('Subject'),
+                date: h('Date'),
+                snippet: msg.data.snippet || '',
+              };
+            }),
+          );
+          return { results };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    gmailRead: tool({
+      description: 'Read the full content of a Gmail email by its message ID.',
+      inputSchema: z.object({
+        messageId: z.string().describe('Gmail message ID'),
+      }),
+      execute: async ({ messageId }) => {
+        const gmail = createGmailClient();
+        if (!gmail) return { error: 'Gmail not configured' };
+        try {
+          const msg = await gmail.users.messages.get({
+            userId: 'me',
+            id: messageId,
+            format: 'full',
+          });
+          const h = (name: string) =>
+            msg.data.payload?.headers?.find(
+              (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
+            )?.value || '';
+
+          // Extract text body
+          let body = '';
+          const extractBody = (part: any): string => {
+            if (part.mimeType === 'text/plain' && part.body?.data) {
+              return Buffer.from(part.body.data, 'base64').toString('utf-8');
+            }
+            if (part.parts) {
+              for (const p of part.parts) {
+                const text = extractBody(p);
+                if (text) return text;
+              }
+            }
+            return '';
+          };
+          body = extractBody(msg.data.payload || {});
+
+          return {
+            id: messageId,
+            from: h('From'),
+            to: h('To'),
+            subject: h('Subject'),
+            date: h('Date'),
+            body: body.slice(0, 4000),
+          };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    gmailSend: tool({
+      description: 'Send a new email via Gmail.',
+      inputSchema: z.object({
+        to: z.string().describe('Recipient email address'),
+        subject: z.string().describe('Email subject'),
+        body: z.string().describe('Email body (plain text)'),
+      }),
+      execute: async ({ to, subject, body }) => {
+        const gmail = createGmailClient();
+        if (!gmail) return { error: 'Gmail not configured' };
+        logger.info({ to, subject }, 'gmailSend called');
+        try {
+          const raw = Buffer.from(
+            [
+              `To: ${to}`,
+              `Subject: ${subject}`,
+              'Content-Type: text/plain; charset=utf-8',
+              '',
+              body,
+            ].join('\r\n'),
+          )
+            .toString('base64')
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/, '');
+
+          const res = await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: { raw },
+          });
+          logger.info({ to, subject, id: res.data.id }, 'gmailSend success');
+          return { success: true, to, subject };
+        } catch (err: any) {
+          logger.error({ to, subject, error: err.message }, 'gmailSend failed');
+          return { error: err.message };
+        }
+      },
+    }),
+
     setModel: tool({
       description:
         'Change the Ollama model used by this agent. Omit the model parameter to list available models. The change takes effect immediately and persists across restarts.',
@@ -525,7 +708,10 @@ function buildTools(
         }
 
         if (!availableModels.includes(model)) {
-          return { error: `Model "${model}" not found in Ollama`, availableModels };
+          return {
+            error: `Model "${model}" not found in Ollama`,
+            availableModels,
+          };
         }
 
         currentModel = model;
@@ -609,12 +795,31 @@ export async function runAgentEngine(
       tools,
       stopWhen: stepCountIs(MAX_STEPS),
       onStepFinish: async (step) => {
-        // Log intermediate steps for debugging (don't send to user — final onOutput handles that)
         if (step.text?.trim()) {
           logger.debug(
             { group: group.name, stepText: step.text.slice(0, 100) },
             'Agent step text',
           );
+        }
+        if (step.toolCalls?.length) {
+          for (const tc of step.toolCalls) {
+            logger.info(
+              { group: group.name, tool: tc.toolName, args: (tc as any).args },
+              'Agent tool call',
+            );
+          }
+        }
+        if (step.toolResults?.length) {
+          for (const tr of step.toolResults) {
+            logger.info(
+              {
+                group: group.name,
+                tool: tr.toolName,
+                result: JSON.stringify((tr as any).result).slice(0, 200),
+              },
+              'Agent tool result',
+            );
+          }
         }
       },
     });
