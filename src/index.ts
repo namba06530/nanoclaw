@@ -277,16 +277,22 @@ function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
       const targetJid = params.target_group_jid || chatJid;
       const targetGroup = registeredGroups[targetJid];
       if (!targetGroup) {
-        throw new Error(`Cannot schedule task: group not registered for JID ${targetJid}`);
+        throw new Error(
+          `Cannot schedule task: group not registered for JID ${targetJid}`,
+        );
       }
       // Authorization: non-main groups can only schedule for themselves
       if (!isMain && targetGroup.folder !== groupFolder) {
-        throw new Error('Unauthorized: non-main group cannot schedule for other groups');
+        throw new Error(
+          'Unauthorized: non-main group cannot schedule for other groups',
+        );
       }
       const scheduleType = params.schedule_type;
       let nextRun: string | null = null;
       if (scheduleType === 'cron') {
-        const interval = CronExpressionParser.parse(params.schedule_value, { tz: TIMEZONE });
+        const interval = CronExpressionParser.parse(params.schedule_value, {
+          tz: TIMEZONE,
+        });
         nextRun = interval.next().toISOString();
       } else if (scheduleType === 'interval') {
         const ms = parseInt(params.schedule_value, 10);
@@ -307,7 +313,10 @@ function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
         status: 'active',
         created_at: new Date().toISOString(),
       });
-      logger.info({ taskId, groupFolder, targetJid, scheduleType }, 'Task scheduled via agent');
+      logger.info(
+        { taskId, groupFolder, targetJid, scheduleType },
+        'Task scheduled via agent',
+      );
     },
     getAvailableGroups,
     getAllTasks,
@@ -364,10 +373,7 @@ async function runAgent(
     );
 
     if (output.status === 'error') {
-      logger.error(
-        { group: group.name, error: output.error },
-        'Agent error',
-      );
+      logger.error({ group: group.name, error: output.error }, 'Agent error');
       return 'error';
     }
 

@@ -41,7 +41,10 @@ vi.mock('./mount-security.js', () => ({
 
 // Mock container-runtime
 vi.mock('./container-runtime.js', () => ({
-  readonlyMountArgs: vi.fn((h: string, c: string) => [`--mount`, `type=bind,src=${h},dst=${c},readonly`]),
+  readonlyMountArgs: vi.fn((h: string, c: string) => [
+    `--mount`,
+    `type=bind,src=${h},dst=${c},readonly`,
+  ]),
 }));
 
 // Mock agent-engine — the core of the new architecture
@@ -73,7 +76,10 @@ const testInput = {
 describe('container-runner (Ollama engine delegation)', () => {
   it('delegates to runAgentEngine and returns its result on success', async () => {
     const onOutput = vi.fn(async () => {});
-    const expectedOutput = { status: 'success' as const, result: 'Here is my response' };
+    const expectedOutput = {
+      status: 'success' as const,
+      result: 'Here is my response',
+    };
     vi.mocked(runAgentEngine).mockResolvedValueOnce(expectedOutput);
 
     const result = await runContainerAgent(
@@ -108,7 +114,10 @@ describe('container-runner (Ollama engine delegation)', () => {
   });
 
   it('calls onProcess callback with null proc and container name', async () => {
-    vi.mocked(runAgentEngine).mockResolvedValueOnce({ status: 'success', result: null });
+    vi.mocked(runAgentEngine).mockResolvedValueOnce({
+      status: 'success',
+      result: null,
+    });
     const onProcess = vi.fn();
 
     await runContainerAgent(testGroup, testInput, onProcess, undefined);

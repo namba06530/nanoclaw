@@ -6,10 +6,7 @@ import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import {
-  DATA_DIR,
-  GROUPS_DIR,
-} from './config.js';
+import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -160,7 +157,7 @@ export async function runContainerAgent(
     group,
     input,
     mounts,
-    callbacks ?? {} as AgentCallbacks,
+    callbacks ?? ({} as AgentCallbacks),
     onOutput,
   );
 

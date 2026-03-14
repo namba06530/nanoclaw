@@ -2,7 +2,12 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import {
+  ASSISTANT_NAME,
+  CONVERSATION_HISTORY_TURNS,
+  DATA_DIR,
+  STORE_DIR,
+} from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -520,31 +525,6 @@ export function setRouterState(key: string, value: string): void {
   ).run(key, value);
 }
 
-// --- Session accessors ---
-
-export function getSession(groupFolder: string): string | undefined {
-  const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
-  return row?.session_id;
-}
-
-export function setSession(groupFolder: string, sessionId: string): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
-}
-
-export function getAllSessions(): Record<string, string> {
-  const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
-    .all() as Array<{ group_folder: string; session_id: string }>;
-  const result: Record<string, string> = {};
-  for (const row of rows) {
-    result[row.group_folder] = row.session_id;
-  }
-  return result;
-}
 
 // --- Registered group accessors ---
 
@@ -675,14 +655,17 @@ function migrateJsonState(): void {
     }
   }
 
-  // Migrate sessions.json
+  // Migrate sessions.json (legacy — insert directly, no longer maintained)
   const sessions = migrateFile('sessions.json') as Record<
     string,
     string
   > | null;
   if (sessions) {
+    const insertSession = db.prepare(
+      'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
+    );
     for (const [folder, sessionId] of Object.entries(sessions)) {
-      setSession(folder, sessionId);
+      insertSession.run(folder, sessionId);
     }
   }
 
@@ -715,9 +698,20 @@ export function storeConversationTurn(
   const insert = db.prepare(
     `INSERT INTO conversation_history (group_folder, role, content) VALUES (?, ?, ?)`,
   );
+  const prune = db.prepare(
+    `DELETE FROM conversation_history
+     WHERE group_folder = ?
+     AND id NOT IN (
+       SELECT id FROM conversation_history
+       WHERE group_folder = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?
+     )`,
+  );
   const insertBoth = db.transaction(() => {
     insert.run(groupFolder, 'user', userContent);
     insert.run(groupFolder, 'assistant', assistantContent);
+    prune.run(groupFolder, groupFolder, CONVERSATION_HISTORY_TURNS * 2);
   });
   insertBoth();
 }

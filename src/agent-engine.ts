@@ -27,10 +27,7 @@ import {
   OLLAMA_MODEL,
   TIMEZONE,
 } from './config.js';
-import {
-  getConversationHistory,
-  storeConversationTurn,
-} from './db.js';
+import { getConversationHistory, storeConversationTurn } from './db.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
@@ -428,6 +425,21 @@ export async function runAgentEngine(
   const history = input.isScheduledTask
     ? []
     : getConversationHistory(group.folder, CONVERSATION_HISTORY_TURNS);
+
+  const totalChars =
+    systemPrompt.length +
+    history.reduce((acc, m) => acc + m.content.length, 0) +
+    input.prompt.length;
+  if (totalChars > 80_000) {
+    logger.warn(
+      {
+        group: group.name,
+        totalChars,
+        historyTurns: history.length / 2,
+      },
+      'Context window approaching limit — consider reducing CONVERSATION_HISTORY_TURNS',
+    );
+  }
 
   try {
     const result = await generateText({
