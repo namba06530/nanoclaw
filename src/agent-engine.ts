@@ -27,7 +27,11 @@ import {
   OLLAMA_MODEL,
   TIMEZONE,
 } from './config.js';
-import { getConversationHistory, storeConversationTurn } from './db.js';
+import {
+  clearConversationHistory,
+  getConversationHistory,
+  storeConversationTurn,
+} from './db.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
@@ -157,6 +161,17 @@ function buildSystemPrompt(
   const groupMd = path.join(resolveGroupFolderPath(group.folder), 'CLAUDE.md');
   if (fs.existsSync(groupMd)) {
     parts.push('\n\n---\n\n' + fs.readFileSync(groupMd, 'utf-8'));
+  }
+
+  // Persistent memory (memory.json in group folder)
+  const memoryFile = path.join(resolveGroupFolderPath(group.folder), 'memory.json');
+  if (fs.existsSync(memoryFile)) {
+    try {
+      const memory = JSON.parse(fs.readFileSync(memoryFile, 'utf-8'));
+      if (Object.keys(memory).length > 0) {
+        parts.push('\n\n## Persistent Memory\n' + JSON.stringify(memory, null, 2));
+      }
+    } catch { /* corrupted file — ignore */ }
   }
 
   // Scheduled tasks context
@@ -369,6 +384,84 @@ function buildTools(
             params,
           );
           return { success: true };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    clearHistory: tool({
+      description:
+        'Clear the conversation history for this group — use when the user asks to forget, reset, or start fresh',
+      inputSchema: z.object({}),
+      execute: async () => {
+        clearConversationHistory(group.folder);
+        return { success: true, message: 'Conversation history cleared' };
+      },
+    }),
+
+    remember: tool({
+      description:
+        'Save a piece of information to persistent memory (survives across conversations and restarts). Use an empty string as value to delete a key.',
+      inputSchema: z.object({
+        key: z.string().describe('Memory key, e.g. "user_city", "preferred_language"'),
+        value: z.string().describe('Value to store. Pass empty string to delete the key.'),
+      }),
+      execute: async ({ key, value }) => {
+        const memFile = path.join(resolveGroupFolderPath(group.folder), 'memory.json');
+        let memory: Record<string, string> = {};
+        try { memory = JSON.parse(fs.readFileSync(memFile, 'utf-8')); } catch {}
+        if (value === '') {
+          delete memory[key];
+        } else {
+          memory[key] = value;
+        }
+        fs.writeFileSync(memFile, JSON.stringify(memory, null, 2));
+        return { success: true };
+      },
+    }),
+
+    webSearch: tool({
+      description:
+        'Search the web and return structured results (title, url, snippet). Use for current events, facts, or when you need to find specific information online.',
+      inputSchema: z.object({
+        query: z.string().describe('Search query'),
+      }),
+      execute: async ({ query }) => {
+        try {
+          const encoded = encodeURIComponent(query);
+          const res = await fetch(
+            `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`,
+            {
+              headers: { 'User-Agent': 'NanoClaw/1.0' },
+              signal: AbortSignal.timeout(10_000),
+            },
+          );
+          const data = (await res.json()) as any;
+
+          const results: Array<{ title: string; url: string; snippet: string }> = [];
+
+          if (data.AbstractText) {
+            results.push({
+              title: data.Heading || query,
+              url: data.AbstractURL || '',
+              snippet: data.AbstractText.slice(0, 300),
+            });
+          }
+          for (const topic of (data.RelatedTopics || []).slice(0, 5)) {
+            if (topic.Text && topic.FirstURL) {
+              results.push({
+                title: topic.Text.slice(0, 80),
+                url: topic.FirstURL,
+                snippet: topic.Text.slice(0, 200),
+              });
+            }
+          }
+
+          if (results.length === 0) {
+            return { results: [], note: 'No structured results — try webFetch with a specific URL' };
+          }
+          return { results };
         } catch (err: any) {
           return { error: err.message };
         }

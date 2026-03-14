@@ -525,7 +525,6 @@ export function setRouterState(key: string, value: string): void {
   ).run(key, value);
 }
 
-
 // --- Registered group accessors ---
 
 export function getRegisteredGroup(
@@ -732,4 +731,10 @@ export function getConversationHistory(
     )
     .all(groupFolder, turns * 2) as Array<{ role: string; content: string }>;
   return rows as Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
+export function clearConversationHistory(groupFolder: string): void {
+  db.prepare(
+    `DELETE FROM conversation_history WHERE group_folder = ?`,
+  ).run(groupFolder);
 }
