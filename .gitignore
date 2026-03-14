@@ -9,14 +9,16 @@ store/
 data/
 logs/
 
-# Groups - only track base structure and specific CLAUDE.md files
+# Groups - only track base structure
+# Note: CLAUDE.md files are intentionally excluded from git.
+# They contain personal information (name, city, preferences) specific to each
+# installation. Copy groups/global/CLAUDE.md.example as a starting point.
 groups/*
 !groups/main/
 !groups/global/
 groups/main/*
 groups/global/*
-!groups/main/CLAUDE.md
-!groups/global/CLAUDE.md
+!groups/global/CLAUDE.md.example
 
 # Secrets
 *.keys.json
