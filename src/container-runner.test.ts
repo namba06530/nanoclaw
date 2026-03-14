@@ -1,20 +1,9 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { EventEmitter } from 'events';
-import { PassThrough } from 'stream';
-
-// Sentinel markers must match container-runner.ts
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+import { describe, it, expect, vi } from 'vitest';
 
 // Mock config
 vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
-  CONTAINER_MAX_OUTPUT_SIZE: 10485760,
-  CONTAINER_TIMEOUT: 1800000, // 30min
-  CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
-  IDLE_TIMEOUT: 1800000, // 30min
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -41,7 +30,6 @@ vi.mock('fs', async () => {
       readFileSync: vi.fn(() => ''),
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
-      copyFileSync: vi.fn(),
     },
   };
 });
@@ -51,42 +39,21 @@ vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
 }));
 
-// Create a controllable fake ChildProcess
-function createFakeProcess() {
-  const proc = new EventEmitter() as EventEmitter & {
-    stdin: PassThrough;
-    stdout: PassThrough;
-    stderr: PassThrough;
-    kill: ReturnType<typeof vi.fn>;
-    pid: number;
-  };
-  proc.stdin = new PassThrough();
-  proc.stdout = new PassThrough();
-  proc.stderr = new PassThrough();
-  proc.kill = vi.fn();
-  proc.pid = 12345;
-  return proc;
-}
+// Mock container-runtime
+vi.mock('./container-runtime.js', () => ({
+  readonlyMountArgs: vi.fn((h: string, c: string) => [`--mount`, `type=bind,src=${h},dst=${c},readonly`]),
+}));
 
-let fakeProc: ReturnType<typeof createFakeProcess>;
+// Mock agent-engine — the core of the new architecture
+vi.mock('./agent-engine.js', () => ({
+  runAgentEngine: vi.fn(),
+  stopAllSandboxes: vi.fn(),
+  ensureSandbox: vi.fn(),
+  stopSandbox: vi.fn(),
+}));
 
-// Mock child_process.spawn
-vi.mock('child_process', async () => {
-  const actual =
-    await vi.importActual<typeof import('child_process')>('child_process');
-  return {
-    ...actual,
-    spawn: vi.fn(() => fakeProc),
-    exec: vi.fn(
-      (_cmd: string, _opts: unknown, cb?: (err: Error | null) => void) => {
-        if (cb) cb(null);
-        return new EventEmitter();
-      },
-    ),
-  };
-});
-
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { runContainerAgent } from './container-runner.js';
+import { runAgentEngine } from './agent-engine.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -103,108 +70,52 @@ const testInput = {
   isMain: false,
 };
 
-function emitOutputMarker(
-  proc: ReturnType<typeof createFakeProcess>,
-  output: ContainerOutput,
-) {
-  const json = JSON.stringify(output);
-  proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
-}
-
-describe('container-runner timeout behavior', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    fakeProc = createFakeProcess();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('timeout after output resolves as success', async () => {
+describe('container-runner (Ollama engine delegation)', () => {
+  it('delegates to runAgentEngine and returns its result on success', async () => {
     const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
+    const expectedOutput = { status: 'success' as const, result: 'Here is my response' };
+    vi.mocked(runAgentEngine).mockResolvedValueOnce(expectedOutput);
+
+    const result = await runContainerAgent(
       testGroup,
       testInput,
       () => {},
       onOutput,
     );
 
-    // Emit output with a result
-    emitOutputMarker(fakeProc, {
-      status: 'success',
-      result: 'Here is my response',
-      newSessionId: 'session-123',
+    expect(vi.mocked(runAgentEngine)).toHaveBeenCalledOnce();
+    expect(result.status).toBe('success');
+    expect(result.result).toBe('Here is my response');
+  });
+
+  it('returns error when runAgentEngine fails', async () => {
+    const onOutput = vi.fn(async () => {});
+    vi.mocked(runAgentEngine).mockResolvedValueOnce({
+      status: 'error',
+      result: null,
+      error: 'Ollama indisponible',
     });
 
-    // Let output processing settle
-    await vi.advanceTimersByTimeAsync(10);
-
-    // Fire the hard timeout (IDLE_TIMEOUT + 30s = 1830000ms)
-    await vi.advanceTimersByTimeAsync(1830000);
-
-    // Emit close event (as if container was stopped by the timeout)
-    fakeProc.emit('close', 137);
-
-    // Let the promise resolve
-    await vi.advanceTimersByTimeAsync(10);
-
-    const result = await resultPromise;
-    expect(result.status).toBe('success');
-    expect(result.newSessionId).toBe('session-123');
-    expect(onOutput).toHaveBeenCalledWith(
-      expect.objectContaining({ result: 'Here is my response' }),
-    );
-  });
-
-  it('timeout with no output resolves as error', async () => {
-    const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
+    const result = await runContainerAgent(
       testGroup,
       testInput,
       () => {},
       onOutput,
     );
 
-    // No output emitted — fire the hard timeout
-    await vi.advanceTimersByTimeAsync(1830000);
-
-    // Emit close event
-    fakeProc.emit('close', 137);
-
-    await vi.advanceTimersByTimeAsync(10);
-
-    const result = await resultPromise;
     expect(result.status).toBe('error');
-    expect(result.error).toContain('timed out');
-    expect(onOutput).not.toHaveBeenCalled();
+    expect(result.error).toContain('Ollama');
   });
 
-  it('normal exit after output resolves as success', async () => {
-    const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
-      testGroup,
-      testInput,
-      () => {},
-      onOutput,
-    );
+  it('calls onProcess callback with null proc and container name', async () => {
+    vi.mocked(runAgentEngine).mockResolvedValueOnce({ status: 'success', result: null });
+    const onProcess = vi.fn();
 
-    // Emit output
-    emitOutputMarker(fakeProc, {
-      status: 'success',
-      result: 'Done',
-      newSessionId: 'session-456',
-    });
+    await runContainerAgent(testGroup, testInput, onProcess, undefined);
 
-    await vi.advanceTimersByTimeAsync(10);
-
-    // Normal exit (no timeout)
-    fakeProc.emit('close', 0);
-
-    await vi.advanceTimersByTimeAsync(10);
-
-    const result = await resultPromise;
-    expect(result.status).toBe('success');
-    expect(result.newSessionId).toBe('session-456');
+    expect(onProcess).toHaveBeenCalledOnce();
+    const [proc, name] = onProcess.mock.calls[0];
+    expect(proc).toBeNull();
+    expect(name).toContain('nanoclaw-sandbox');
   });
 });

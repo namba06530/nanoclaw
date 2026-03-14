@@ -3,19 +3,18 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
-  CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
+  AgentCallbacks,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -24,12 +23,12 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
 } from './container-runtime.js';
+import { stopAllSandboxes } from './agent-engine.js';
 import {
+  createTask,
   getAllChats,
   getAllRegisteredGroups,
-  getAllSessions,
   getAllTasks,
   getMessagesSince,
   getNewMessages,
@@ -38,10 +37,10 @@ import {
   initDatabase,
   setRegisteredGroup,
   setRouterState,
-  setSession,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import { CronExpressionParser } from 'cron-parser';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
@@ -60,7 +59,6 @@ import { logger } from './logger.js';
 export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
-let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -77,7 +75,6 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
-  sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
@@ -260,6 +257,63 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   return true;
 }
 
+function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
+  return {
+    sendMessage: async (jid: string, text: string) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'No channel owns JID, cannot send message');
+        return;
+      }
+      const formatted = formatOutbound(text);
+      if (formatted) await channel.sendMessage(jid, formatted);
+    },
+    scheduleTask: async (
+      groupFolder: string,
+      isMain: boolean,
+      chatJid: string,
+      params,
+    ) => {
+      const targetJid = params.target_group_jid || chatJid;
+      const targetGroup = registeredGroups[targetJid];
+      if (!targetGroup) {
+        throw new Error(`Cannot schedule task: group not registered for JID ${targetJid}`);
+      }
+      // Authorization: non-main groups can only schedule for themselves
+      if (!isMain && targetGroup.folder !== groupFolder) {
+        throw new Error('Unauthorized: non-main group cannot schedule for other groups');
+      }
+      const scheduleType = params.schedule_type;
+      let nextRun: string | null = null;
+      if (scheduleType === 'cron') {
+        const interval = CronExpressionParser.parse(params.schedule_value, { tz: TIMEZONE });
+        nextRun = interval.next().toISOString();
+      } else if (scheduleType === 'interval') {
+        const ms = parseInt(params.schedule_value, 10);
+        nextRun = new Date(Date.now() + ms).toISOString();
+      } else if (scheduleType === 'once') {
+        nextRun = new Date(params.schedule_value).toISOString();
+      }
+      const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      createTask({
+        id: taskId,
+        group_folder: targetGroup.folder,
+        chat_jid: targetJid,
+        prompt: params.prompt,
+        schedule_type: scheduleType,
+        schedule_value: params.schedule_value,
+        context_mode: params.context_mode || 'group',
+        next_run: nextRun,
+        status: 'active',
+        created_at: new Date().toISOString(),
+      });
+      logger.info({ taskId, groupFolder, targetJid, scheduleType }, 'Task scheduled via agent');
+    },
+    getAvailableGroups,
+    getAllTasks,
+  };
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -267,9 +321,8 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
 
-  // Update tasks snapshot for container to read (filtered by group)
+  // Update tasks snapshot (IPC watcher still uses these files)
   const tasks = getAllTasks();
   writeTasksSnapshot(
     group.folder,
@@ -285,7 +338,7 @@ async function runAgent(
     })),
   );
 
-  // Update available groups snapshot (main group only can see all groups)
+  // Update available groups snapshot
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
     group.folder,
@@ -294,23 +347,11 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
-  const wrappedOnOutput = onOutput
-    ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
-        await onOutput(output);
-      }
-    : undefined;
-
   try {
     const output = await runContainerAgent(
       group,
       {
         prompt,
-        sessionId,
         groupFolder: group.folder,
         chatJid,
         isMain,
@@ -318,18 +359,14 @@ async function runAgent(
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
-      wrappedOnOutput,
+      onOutput,
+      buildAgentCallbacks(chatJid),
     );
-
-    if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
 
     if (output.status === 'error') {
       logger.error(
         { group: group.name, error: output.error },
-        'Container agent error',
+        'Agent error',
       );
       return 'error';
     }
@@ -471,16 +508,10 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
-  // Start credential proxy (containers route API calls through this)
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-  );
-
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    proxyServer.close();
+    await stopAllSandboxes();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -543,7 +574,6 @@ async function main(): Promise<void> {
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
@@ -556,6 +586,7 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
+    agentCallbacks: buildAgentCallbacks(),
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {

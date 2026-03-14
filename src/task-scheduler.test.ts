@@ -40,10 +40,10 @@ describe('task scheduler', () => {
 
     startSchedulerLoop({
       registeredGroups: () => ({}),
-      getSessions: () => ({}),
       queue: { enqueueTask } as any,
       onProcess: () => {},
       sendMessage: async () => {},
+      agentCallbacks: {} as any,
     });
 
     await vi.advanceTimersByTimeAsync(10);

@@ -6,7 +6,13 @@ import { readEnvFile } from './env.js';
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'OLLAMA_BASE_URL',
+  'OLLAMA_MODEL',
+  'AGENT_MAX_STEPS',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -71,3 +77,13 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Ollama engine configuration
+export const OLLAMA_BASE_URL =
+  process.env.OLLAMA_BASE_URL || envConfig.OLLAMA_BASE_URL || 'http://localhost:11434';
+export const OLLAMA_MODEL =
+  process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'qwen2.5:14b-instruct';
+export const AGENT_MAX_STEPS = parseInt(
+  process.env.AGENT_MAX_STEPS || envConfig.AGENT_MAX_STEPS || '50',
+  10,
+);

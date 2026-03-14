@@ -32,6 +32,7 @@ export function startCredentialProxy(
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_MODEL',
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
@@ -104,7 +105,24 @@ export function startCredentialProxy(
           }
         });
 
-        upstream.write(body);
+        // If ANTHROPIC_MODEL is configured, rewrite the model field in the
+        // request body so third-party endpoints (Ollama, etc.) receive the
+        // correct model name regardless of what the SDK sent.
+        let outBody = body;
+        if (secrets.ANTHROPIC_MODEL && body.length > 0) {
+          try {
+            const parsed = JSON.parse(body.toString());
+            if (parsed.model !== undefined) {
+              parsed.model = secrets.ANTHROPIC_MODEL;
+              outBody = Buffer.from(JSON.stringify(parsed));
+              headers['content-length'] = outBody.length;
+            }
+          } catch {
+            // not JSON, send as-is
+          }
+        }
+
+        upstream.write(outBody);
         upstream.end();
       });
     });

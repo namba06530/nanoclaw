@@ -4,6 +4,7 @@ import fs from 'fs';
 
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
+  AgentCallbacks,
   ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
@@ -64,15 +65,15 @@ export function computeNextRun(task: ScheduledTask): string | null {
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
-    proc: ChildProcess,
+    proc: ChildProcess | null,
     containerName: string,
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  agentCallbacks: AgentCallbacks;
 }
 
 async function runTask(
@@ -149,11 +150,6 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
-
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
@@ -173,7 +169,6 @@ async function runTask(
       group,
       {
         prompt: task.prompt,
-        sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain,
@@ -197,6 +192,7 @@ async function runTask(
           error = streamedOutput.error || 'Unknown error';
         }
       },
+      deps.agentCallbacks,
     );
 
     if (closeTimer) clearTimeout(closeTimer);
