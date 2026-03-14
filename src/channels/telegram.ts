@@ -212,7 +212,13 @@ export class TelegramChannel implements Channel {
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
 
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
 
       if ((largest.file_size || 0) > MAX_IMG_SIZE) {
         this.opts.onMessage(chatJid, {
@@ -235,10 +241,7 @@ export class TelegramChannel implements Channel {
         const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
         const buffer = Buffer.from(await resp.arrayBuffer());
         imageBase64 = buffer.toString('base64');
-        logger.info(
-          { bytes: buffer.length },
-          'Telegram photo downloaded',
-        );
+        logger.info({ bytes: buffer.length }, 'Telegram photo downloaded');
       } catch (err: any) {
         logger.warn({ err: err.message }, 'Telegram photo download failed');
       }

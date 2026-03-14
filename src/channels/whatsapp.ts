@@ -211,8 +211,7 @@ export class WhatsAppChannel implements Channel {
 
             // Handle image attachments — download and pass as base64 for vision
             const imgMsg =
-              normalized.imageMessage ??
-              (msg.message as any)?.imageMessage;
+              normalized.imageMessage ?? (msg.message as any)?.imageMessage;
             if (imgMsg) {
               const fileSize = (imgMsg.fileLength as number) || 0;
               const MAX_IMG_SIZE = 10 * 1024 * 1024; // 10 MB
