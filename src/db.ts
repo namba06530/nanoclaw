@@ -82,6 +82,15 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS conversation_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_conv_history
+      ON conversation_history(group_folder, created_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -694,4 +703,39 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// ─── Conversation history (multi-turn memory) ────────────────────────────────
+
+export function storeConversationTurn(
+  groupFolder: string,
+  userContent: string,
+  assistantContent: string,
+): void {
+  const insert = db.prepare(
+    `INSERT INTO conversation_history (group_folder, role, content) VALUES (?, ?, ?)`,
+  );
+  const insertBoth = db.transaction(() => {
+    insert.run(groupFolder, 'user', userContent);
+    insert.run(groupFolder, 'assistant', assistantContent);
+  });
+  insertBoth();
+}
+
+export function getConversationHistory(
+  groupFolder: string,
+  turns: number,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const rows = db
+    .prepare(
+      `SELECT role, content FROM (
+         SELECT role, content, created_at, id
+         FROM conversation_history
+         WHERE group_folder = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?
+       ) ORDER BY created_at, id`,
+    )
+    .all(groupFolder, turns * 2) as Array<{ role: string; content: string }>;
+  return rows as Array<{ role: 'user' | 'assistant'; content: string }>;
 }

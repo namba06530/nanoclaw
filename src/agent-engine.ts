@@ -21,11 +21,16 @@ import {
 } from './container-runner.js';
 import {
   AGENT_MAX_STEPS,
+  CONVERSATION_HISTORY_TURNS,
   GROUPS_DIR,
   OLLAMA_BASE_URL,
   OLLAMA_MODEL,
   TIMEZONE,
 } from './config.js';
+import {
+  getConversationHistory,
+  storeConversationTurn,
+} from './db.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
@@ -107,7 +112,10 @@ export async function ensureSandbox(
   );
 
   sandboxContainers.set(group.folder, containerName);
-  logger.info({ group: group.name, containerName }, 'Sandbox container started');
+  logger.info(
+    { group: group.name, containerName },
+    'Sandbox container started',
+  );
   return containerName;
 }
 
@@ -119,7 +127,10 @@ export async function stopSandbox(groupFolder: string): Promise<void> {
   if (!name) return;
   sandboxContainers.delete(groupFolder);
   await execAsync(`docker stop ${name}`).catch(() => {});
-  logger.info({ groupFolder, containerName: name }, 'Sandbox container stopped');
+  logger.info(
+    { groupFolder, containerName: name },
+    'Sandbox container stopped',
+  );
 }
 
 /**
@@ -157,9 +168,7 @@ function buildSystemPrompt(
     ? allTasks
     : allTasks.filter((t) => t.group_folder === group.folder);
   if (tasks.length > 0) {
-    parts.push(
-      '\n\n## Scheduled Tasks\n' + JSON.stringify(tasks, null, 2),
-    );
+    parts.push('\n\n## Scheduled Tasks\n' + JSON.stringify(tasks, null, 2));
   }
 
   // Available groups (main only)
@@ -242,7 +251,9 @@ function buildTools(
       inputSchema: z.object({
         path: z
           .string()
-          .describe('Absolute path in the container, must be under /workspace/group/'),
+          .describe(
+            'Absolute path in the container, must be under /workspace/group/',
+          ),
         content: z.string().describe('Content to write'),
       }),
       execute: async ({ path: filePath, content }) => {
@@ -326,7 +337,9 @@ function buildTools(
       description:
         'Schedule a task to run automatically (cron, interval, or once)',
       inputSchema: z.object({
-        prompt: z.string().describe('Instructions for the agent when the task runs'),
+        prompt: z
+          .string()
+          .describe('Instructions for the agent when the task runs'),
         schedule_type: z
           .enum(['cron', 'interval', 'once'])
           .describe(
@@ -340,11 +353,15 @@ function buildTools(
         context_mode: z
           .enum(['group', 'isolated'])
           .default('group')
-          .describe('group: uses conversation context, isolated: fresh session'),
+          .describe(
+            'group: uses conversation context, isolated: fresh session',
+          ),
         target_group_jid: z
           .string()
           .optional()
-          .describe('Target group JID (main group only, to schedule for other groups)'),
+          .describe(
+            'Target group JID (main group only, to schedule for other groups)',
+          ),
       }),
       execute: async (params) => {
         try {
@@ -408,22 +425,34 @@ export async function runAgentEngine(
   );
 
   // 4. Run the agentic loop
+  const history = input.isScheduledTask
+    ? []
+    : getConversationHistory(group.folder, CONVERSATION_HISTORY_TURNS);
+
   try {
     const result = await generateText({
       model: ollama(OLLAMA_MODEL),
       system: systemPrompt,
-      messages: [{ role: 'user', content: input.prompt }],
+      messages: [...history, { role: 'user', content: input.prompt }],
       tools,
       stopWhen: stepCountIs(MAX_STEPS),
       onStepFinish: async (step) => {
         // Log intermediate steps for debugging (don't send to user — final onOutput handles that)
         if (step.text?.trim()) {
-          logger.debug({ group: group.name, stepText: step.text.slice(0, 100) }, 'Agent step text');
+          logger.debug(
+            { group: group.name, stepText: step.text.slice(0, 100) },
+            'Agent step text',
+          );
         }
       },
     });
 
-    // 5. Archive conversation
+    // 5. Persist conversation turn (skip scheduled tasks — isolated context)
+    if (result.text && !input.isScheduledTask) {
+      storeConversationTurn(group.folder, input.prompt, result.text);
+    }
+
+    // 6. Archive conversation
     const convDir = path.join(
       resolveGroupFolderPath(group.folder),
       'conversations',

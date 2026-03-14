@@ -12,6 +12,7 @@ const envConfig = readEnvFile([
   'OLLAMA_BASE_URL',
   'OLLAMA_MODEL',
   'AGENT_MAX_STEPS',
+  'CONVERSATION_HISTORY_TURNS',
 ]);
 
 export const ASSISTANT_NAME =
@@ -80,10 +81,18 @@ export const TIMEZONE =
 
 // Ollama engine configuration
 export const OLLAMA_BASE_URL =
-  process.env.OLLAMA_BASE_URL || envConfig.OLLAMA_BASE_URL || 'http://localhost:11434';
+  process.env.OLLAMA_BASE_URL ||
+  envConfig.OLLAMA_BASE_URL ||
+  'http://localhost:11434';
 export const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'qwen2.5:14b-instruct';
 export const AGENT_MAX_STEPS = parseInt(
   process.env.AGENT_MAX_STEPS || envConfig.AGENT_MAX_STEPS || '50',
+  10,
+);
+export const CONVERSATION_HISTORY_TURNS = parseInt(
+  process.env.CONVERSATION_HISTORY_TURNS ||
+    envConfig.CONVERSATION_HISTORY_TURNS ||
+    '10',
   10,
 );
