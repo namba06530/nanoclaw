@@ -40,3 +40,31 @@ export function readEnvFile(keys: string[]): Record<string, string> {
 
   return result;
 }
+
+/**
+ * Write or update a single key in the .env file.
+ * If the key already exists, its line is replaced in-place.
+ * If not, it is appended at the end.
+ */
+export function writeEnvFile(key: string, value: string): void {
+  const envFile = path.join(process.cwd(), '.env');
+  let content = '';
+  try {
+    content = fs.readFileSync(envFile, 'utf-8');
+  } catch {
+    // file does not exist — will be created
+  }
+
+  const lines = content.split('\n');
+  const keyPattern = new RegExp(`^${key}\\s*=`);
+  const newLine = `${key}=${value}`;
+  const idx = lines.findIndex((l) => keyPattern.test(l.trim()));
+
+  if (idx !== -1) {
+    lines[idx] = newLine;
+  } else {
+    lines.push(newLine);
+  }
+
+  fs.writeFileSync(envFile, lines.join('\n'));
+}

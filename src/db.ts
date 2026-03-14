@@ -734,7 +734,7 @@ export function getConversationHistory(
 }
 
 export function clearConversationHistory(groupFolder: string): void {
-  db.prepare(
-    `DELETE FROM conversation_history WHERE group_folder = ?`,
-  ).run(groupFolder);
+  db.prepare(`DELETE FROM conversation_history WHERE group_folder = ?`).run(
+    groupFolder,
+  );
 }

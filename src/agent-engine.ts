@@ -35,8 +35,12 @@ import {
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
+import { writeEnvFile } from './env.js';
 
 const execAsync = promisify(execCallback);
+
+// Mutable model — can be changed at runtime via setModel tool
+let currentModel = OLLAMA_MODEL;
 
 const MAX_STEPS = AGENT_MAX_STEPS;
 const BASH_TIMEOUT_MS = 30_000;
@@ -164,14 +168,21 @@ function buildSystemPrompt(
   }
 
   // Persistent memory (memory.json in group folder)
-  const memoryFile = path.join(resolveGroupFolderPath(group.folder), 'memory.json');
+  const memoryFile = path.join(
+    resolveGroupFolderPath(group.folder),
+    'memory.json',
+  );
   if (fs.existsSync(memoryFile)) {
     try {
       const memory = JSON.parse(fs.readFileSync(memoryFile, 'utf-8'));
       if (Object.keys(memory).length > 0) {
-        parts.push('\n\n## Persistent Memory\n' + JSON.stringify(memory, null, 2));
+        parts.push(
+          '\n\n## Persistent Memory\n' + JSON.stringify(memory, null, 2),
+        );
       }
-    } catch { /* corrupted file — ignore */ }
+    } catch {
+      /* corrupted file — ignore */
+    }
   }
 
   // Scheduled tasks context
@@ -404,13 +415,22 @@ function buildTools(
       description:
         'Save a piece of information to persistent memory (survives across conversations and restarts). Use an empty string as value to delete a key.',
       inputSchema: z.object({
-        key: z.string().describe('Memory key, e.g. "user_city", "preferred_language"'),
-        value: z.string().describe('Value to store. Pass empty string to delete the key.'),
+        key: z
+          .string()
+          .describe('Memory key, e.g. "user_city", "preferred_language"'),
+        value: z
+          .string()
+          .describe('Value to store. Pass empty string to delete the key.'),
       }),
       execute: async ({ key, value }) => {
-        const memFile = path.join(resolveGroupFolderPath(group.folder), 'memory.json');
+        const memFile = path.join(
+          resolveGroupFolderPath(group.folder),
+          'memory.json',
+        );
         let memory: Record<string, string> = {};
-        try { memory = JSON.parse(fs.readFileSync(memFile, 'utf-8')); } catch {}
+        try {
+          memory = JSON.parse(fs.readFileSync(memFile, 'utf-8'));
+        } catch {}
         if (value === '') {
           delete memory[key];
         } else {
@@ -439,7 +459,11 @@ function buildTools(
           );
           const data = (await res.json()) as any;
 
-          const results: Array<{ title: string; url: string; snippet: string }> = [];
+          const results: Array<{
+            title: string;
+            url: string;
+            snippet: string;
+          }> = [];
 
           if (data.AbstractText) {
             results.push({
@@ -459,12 +483,55 @@ function buildTools(
           }
 
           if (results.length === 0) {
-            return { results: [], note: 'No structured results — try webFetch with a specific URL' };
+            return {
+              results: [],
+              note: 'No structured results — try webFetch with a specific URL',
+            };
           }
           return { results };
         } catch (err: any) {
           return { error: err.message };
         }
+      },
+    }),
+
+    setModel: tool({
+      description:
+        'Change the Ollama model used by this agent. Omit the model parameter to list available models. The change takes effect immediately and persists across restarts.',
+      inputSchema: z.object({
+        model: z
+          .string()
+          .optional()
+          .describe(
+            'Model name to switch to (e.g. "llama3.2:3b"). Omit to list available models.',
+          ),
+      }),
+      execute: async ({ model }) => {
+        let availableModels: string[] = [];
+        try {
+          const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
+            signal: AbortSignal.timeout(5_000),
+          });
+          const data = (await res.json()) as {
+            models?: Array<{ name: string }>;
+          };
+          availableModels = (data.models || []).map((m) => m.name);
+        } catch (err: any) {
+          return { error: `Cannot reach Ollama: ${err.message}` };
+        }
+
+        if (!model) {
+          return { currentModel, availableModels };
+        }
+
+        if (!availableModels.includes(model)) {
+          return { error: `Model "${model}" not found in Ollama`, availableModels };
+        }
+
+        currentModel = model;
+        writeEnvFile('OLLAMA_MODEL', model);
+
+        return { success: true, currentModel, availableModels };
       },
     }),
   };
@@ -510,7 +577,7 @@ export async function runAgentEngine(
   const tools = buildTools(containerName, group, input, callbacks);
 
   logger.info(
-    { group: group.name, model: OLLAMA_MODEL, containerName },
+    { group: group.name, model: currentModel, containerName },
     'Starting Ollama agent',
   );
 
@@ -536,7 +603,7 @@ export async function runAgentEngine(
 
   try {
     const result = await generateText({
-      model: ollama(OLLAMA_MODEL),
+      model: ollama(currentModel),
       system: systemPrompt,
       messages: [...history, { role: 'user', content: input.prompt }],
       tools,
@@ -570,7 +637,7 @@ export async function runAgentEngine(
     );
 
     logger.info(
-      { group: group.name, steps: result.steps.length, model: OLLAMA_MODEL },
+      { group: group.name, steps: result.steps.length, model: currentModel },
       'Agent completed',
     );
 
