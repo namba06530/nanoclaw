@@ -261,20 +261,26 @@ function buildSystemPrompt(
     parts.push('\n\n## Available Groups\n' + JSON.stringify(groups, null, 2));
   }
 
-  // Instructions for brevity and tool usage
+  // Instructions for brevity, memory, and tool usage
   parts.push(
-    '\n\n## Response Instructions\n' +
+    '\n\n## Persistent Memory\n' +
+      'You have a `remember` tool to save information across conversations. ' +
+      'Use it proactively whenever you learn something useful about a user: ' +
+      "their city, preferences, favorite teams, habits, recurring requests, etc. " +
+      'Use descriptive keys, e.g. "fab_city", "olivier_football_team", "preferred_language". ' +
+      "Do NOT save ephemeral info (today's weather, one-off sports results).\n\n" +
+      '## Response Instructions\n' +
       'Be concise. Use the language of the user. ' +
       'Do not add unnecessary disclaimers or repetition. ' +
       'For messaging apps: keep responses short unless detail is explicitly requested.\n\n' +
       '## CRITICAL: Tool Usage\n' +
       'You MUST use your tools to perform actions. NEVER pretend to have performed an action without calling the appropriate tool. ' +
       'Every email send requires a gmailSend tool call. Every file read requires a readFile tool call. ' +
-      'If a user asks you to do something and you have a tool for it, you MUST call the tool — do NOT simulate or hallucinate the result.\n\n' +
-      '## Fichiers joints\n' +
-      'Quand un message commence par `Fichier joint "nom" :`, le contenu du fichier a déjà été extrait et t\'est fourni directement dans le message. ' +
-      "Lis et utilise ce contenu directement — pas besoin d'outil. " +
-      "Si le contenu dit \"[PDF scanné ...]\", informe l'utilisateur que l'OCR n'est pas disponible pour ce document scanné.",
+      "If a user asks you to do something and you have a tool for it, you MUST call the tool — do NOT simulate or hallucinate the result.\n\n" +
+      '## Attached files\n' +
+      'When a message starts with `Fichier joint "nom" :`, the file content has already been extracted and is provided directly in the message. ' +
+      'Read and use it directly — no tool needed. ' +
+      'If the content says "[PDF scanné ...]", inform the user that OCR is unavailable for that scanned document.',
   );
 
   return parts.join('\n');
@@ -709,6 +715,11 @@ function buildTools(
         };
 
         // Helper: DDG fallback via Jina Reader
+        // DDG renders each result as 2-3 links to the same URL:
+        //   1. short title ("Peymeinade - Wikipedia")
+        //   2. snippet text ("Peymeinade is a commune in the Alpes-Maritimes...")
+        //   3. bare domain ("en.wikipedia.org/wiki/Peymeinade")
+        // Strategy: deduplicate by URL, keep the LONGEST title as the snippet.
         const searchDDG = async () => {
           const jinaUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encoded}`;
           const res = await fetch(jinaUrl, {
@@ -716,18 +727,31 @@ function buildTools(
             signal: AbortSignal.timeout(15_000),
           });
           const markdown = await res.text();
-          const results: Array<{ title: string; url: string }> = [];
+
+          // Collect all matches, keeping longest title per URL
+          const byUrl = new Map<string, { title: string; snippet: string }>();
           const linkPattern =
             /\[([^\]]{5,})\]\(https:\/\/duckduckgo\.com\/l\/\?uddg=([^&)]+)[^)]*\)/g;
           let match;
-          while ((match = linkPattern.exec(markdown)) !== null && results.length < 5) {
-            const title = match[1].trim();
+          while ((match = linkPattern.exec(markdown)) !== null) {
+            const text = match[1].trim();
             const realUrl = decodeURIComponent(match[2]);
-            if (realUrl.startsWith('http') && !realUrl.includes('duckduckgo.com')) {
-              results.push({ title, url: realUrl });
+            if (!realUrl.startsWith('http') || realUrl.includes('duckduckgo.com')) continue;
+            const existing = byUrl.get(realUrl);
+            if (!existing) {
+              byUrl.set(realUrl, { title: text, snippet: '' });
+            } else if (text.length > existing.title.length) {
+              // Longer text is the snippet; keep shorter as title
+              byUrl.set(realUrl, {
+                title: existing.title,
+                snippet: text.slice(0, 300),
+              });
             }
           }
-          return results;
+
+          return Array.from(byUrl.entries())
+            .slice(0, 5)
+            .map(([url, { title, snippet }]) => ({ title, url, snippet }));
         };
 
         try {
@@ -773,19 +797,31 @@ function buildTools(
             ]).catch(() => null);
 
             if (winner) {
-              logger.info({ query, count: winner.results.length, source: winner.source }, 'webSearch results');
+              logger.info(
+                { query, count: winner.results.length, source: winner.source },
+                'webSearch results',
+              );
               return { results: winner.results };
             }
-            return { results: [], note: 'No results — try webFetch with a specific URL' };
+            return {
+              results: [],
+              note: 'No results — try webFetch with a specific URL',
+            };
           }
 
           // No API key: DDG only
           const results = await searchDDG();
           if (results.length === 0) {
             logger.warn({ query }, 'webSearch: no results from DDG');
-            return { results: [], note: 'No results — try webFetch with a specific URL' };
+            return {
+              results: [],
+              note: 'No results — try webFetch with a specific URL',
+            };
           }
-          logger.info({ query, count: results.length, source: 'ddg-fallback' }, 'webSearch results');
+          logger.info(
+            { query, count: results.length, source: 'ddg-fallback' },
+            'webSearch results',
+          );
           return { results };
         } catch (err: any) {
           logger.warn({ query, err: (err as any).message }, 'webSearch failed');
