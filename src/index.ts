@@ -342,8 +342,18 @@ function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
     getAllTasks,
     deleteTask,
     updateTask,
-    registerGroup: (jid: string, name: string, folder: string, trigger: string) => {
-      registerGroup(jid, { name, folder, trigger, added_at: new Date().toISOString() });
+    registerGroup: (
+      jid: string,
+      name: string,
+      folder: string,
+      trigger: string,
+    ) => {
+      registerGroup(jid, {
+        name,
+        folder,
+        trigger,
+        added_at: new Date().toISOString(),
+      });
     },
   };
 }

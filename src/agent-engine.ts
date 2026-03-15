@@ -38,9 +38,13 @@ import {
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
-import { writeEnvFile } from './env.js';
+import { readEnvFile, writeEnvFile } from './env.js';
 
 const execAsync = promisify(execCallback);
+
+// Jina API key — optional, improves search quality and rate limits
+const { JINA_API_KEY } = readEnvFile(['JINA_API_KEY']);
+const jinaApiKey = process.env.JINA_API_KEY || JINA_API_KEY || '';
 
 // Mutable model — can be changed at runtime via setModel tool
 let currentModel = OLLAMA_MODEL;
@@ -116,7 +120,10 @@ export interface AgentCallbacks {
   updateTask: (
     id: string,
     updates: Partial<
-      Pick<ScheduledTask, 'prompt' | 'schedule_type' | 'schedule_value' | 'status'>
+      Pick<
+        ScheduledTask,
+        'prompt' | 'schedule_type' | 'schedule_value' | 'status'
+      >
     >,
   ) => void;
   registerGroup: (
@@ -373,29 +380,44 @@ function buildTools(
     }),
 
     webFetch: tool({
-      description: 'Fetch content from a URL',
+      description:
+        'Fetch content from a URL. For web pages, returns clean readable text (HTML → markdown). For JSON APIs, use format: "json".',
       inputSchema: z.object({
         url: z.string().describe('URL to fetch'),
         format: z
           .enum(['text', 'json'])
           .default('text')
-          .describe('Response format'),
+          .describe(
+            'Use "text" for web pages (returns clean markdown), "json" for JSON APIs (direct fetch)',
+          ),
       }),
       execute: async ({ url, format }) => {
         try {
-          const res = await fetch(url, {
-            headers: { 'User-Agent': 'NanoClaw/1.0' },
-            signal: AbortSignal.timeout(15_000),
-          });
-          const text = await res.text();
           if (format === 'json') {
+            const res = await fetch(url, {
+              headers: { 'User-Agent': 'NanoClaw/1.0' },
+              signal: AbortSignal.timeout(15_000),
+            });
+            const text = await res.text();
             try {
               return { content: JSON.parse(text), status: res.status };
             } catch {
               return { content: text.slice(0, 50_000), status: res.status };
             }
           }
-          return { content: text.slice(0, 50_000), status: res.status };
+          // Proxy through Jina Reader: converts any URL to clean markdown
+          const jinaUrl = `https://r.jina.ai/${url}`;
+          const jinaHeaders: Record<string, string> = {
+            'User-Agent': 'NanoClaw/1.0',
+            'X-Retain-Images': 'none',
+          };
+          if (jinaApiKey) jinaHeaders['Authorization'] = `Bearer ${jinaApiKey}`;
+          const res = await fetch(jinaUrl, {
+            headers: jinaHeaders,
+            signal: AbortSignal.timeout(20_000),
+          });
+          const text = await res.text();
+          return { content: text.slice(0, 30_000), status: res.status };
         } catch (err: any) {
           return { error: err.message };
         }
@@ -496,7 +518,9 @@ function buildTools(
               trigger: z
                 .string()
                 .default('@Oliv')
-                .describe('Trigger pattern to activate the agent (e.g. "@Oliv")'),
+                .describe(
+                  'Trigger pattern to activate the agent (e.g. "@Oliv")',
+                ),
             }),
             execute: async ({ jid, name, folder, trigger }) => {
               try {
@@ -591,14 +615,28 @@ function buildTools(
           .string()
           .optional()
           .describe('New schedule value (cron expr, ms, or ISO datetime)'),
-        prompt: z.string().optional().describe('New prompt/instructions for the task'),
+        prompt: z
+          .string()
+          .optional()
+          .describe('New prompt/instructions for the task'),
       }),
-      execute: async ({ task_id, status, schedule_type, schedule_value, prompt }) => {
+      execute: async ({
+        task_id,
+        status,
+        schedule_type,
+        schedule_value,
+        prompt,
+      }) => {
         try {
           const all = callbacks.getAllTasks();
           const task = all.find((t) => t.id === task_id);
           if (!task) return { error: `Task "${task_id}" not found` };
-          callbacks.updateTask(task_id, { status, schedule_type, schedule_value, prompt });
+          callbacks.updateTask(task_id, {
+            status,
+            schedule_type,
+            schedule_value,
+            prompt,
+          });
           return { success: true, updated: task_id };
         } catch (err: any) {
           return { error: err.message };
@@ -653,49 +691,105 @@ function buildTools(
         query: z.string().describe('Search query'),
       }),
       execute: async ({ query }) => {
-        try {
-          const encoded = encodeURIComponent(query);
-          const res = await fetch(
-            `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`,
-            {
-              headers: { 'User-Agent': 'NanoClaw/1.0' },
-              signal: AbortSignal.timeout(10_000),
-            },
-          );
-          const data = (await res.json()) as any;
+        const encoded = encodeURIComponent(query);
 
-          const results: Array<{
-            title: string;
-            url: string;
-            snippet: string;
-          }> = [];
-
-          if (data.AbstractText) {
-            results.push({
-              title: data.Heading || query,
-              url: data.AbstractURL || '',
-              snippet: data.AbstractText.slice(0, 300),
-            });
-          }
-          for (const topic of (data.RelatedTopics || []).slice(0, 5)) {
-            if (topic.Text && topic.FirstURL) {
-              results.push({
-                title: topic.Text.slice(0, 80),
-                url: topic.FirstURL,
-                snippet: topic.Text.slice(0, 200),
-              });
+        // Helper: extract snippet from Jina item
+        const extractSnippet = (item: any): string => {
+          let snippet = (item.description || '').trim();
+          if (!snippet && item.content) {
+            for (const line of (item.content as string).split('\n')) {
+              const clean = line.replace(/^[#*\-\[\]>|]+\s*/g, '').trim();
+              if (clean.length > 60 && !clean.startsWith('http')) {
+                snippet = clean;
+                break;
+              }
             }
           }
+          return snippet.slice(0, 300);
+        };
 
-          if (results.length === 0) {
-            return {
-              results: [],
-              note: 'No structured results — try webFetch with a specific URL',
-            };
+        // Helper: DDG fallback via Jina Reader
+        const searchDDG = async () => {
+          const jinaUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encoded}`;
+          const res = await fetch(jinaUrl, {
+            headers: { 'User-Agent': 'NanoClaw/1.0', 'X-Retain-Images': 'none' },
+            signal: AbortSignal.timeout(15_000),
+          });
+          const markdown = await res.text();
+          const results: Array<{ title: string; url: string }> = [];
+          const linkPattern =
+            /\[([^\]]{5,})\]\(https:\/\/duckduckgo\.com\/l\/\?uddg=([^&)]+)[^)]*\)/g;
+          let match;
+          while ((match = linkPattern.exec(markdown)) !== null && results.length < 5) {
+            const title = match[1].trim();
+            const realUrl = decodeURIComponent(match[2]);
+            if (realUrl.startsWith('http') && !realUrl.includes('duckduckgo.com')) {
+              results.push({ title, url: realUrl });
+            }
           }
+          return results;
+        };
+
+        try {
+          if (jinaApiKey) {
+            // Race s.jina.ai (rich results) against DDG fallback (reliable ~3s)
+            // Whichever resolves first with non-empty results wins
+            const jinaSearch = fetch(`https://s.jina.ai/${encoded}`, {
+              headers: {
+                'User-Agent': 'NanoClaw/1.0',
+                Accept: 'application/json',
+                'X-Retain-Images': 'none',
+                Authorization: `Bearer ${jinaApiKey}`,
+              },
+              signal: AbortSignal.timeout(25_000),
+            })
+              .then((r) => r.json())
+              .then((data: any) => {
+                const items: any[] = data?.data || [];
+                if (items.length === 0) return null;
+                return {
+                  source: 'jina-search' as const,
+                  results: items.slice(0, 5).map((item: any) => ({
+                    title: item.title || '',
+                    url: item.url || '',
+                    snippet: extractSnippet(item),
+                  })),
+                };
+              })
+              .catch(() => null);
+
+            const ddgSearch = searchDDG()
+              .then((results) =>
+                results.length > 0
+                  ? { source: 'ddg-fallback' as const, results }
+                  : null,
+              )
+              .catch(() => null);
+
+            // Take first non-null result; prefer jina if both arrive quickly
+            const winner = await Promise.any([
+              jinaSearch.then((r) => r ?? Promise.reject()),
+              ddgSearch.then((r) => r ?? Promise.reject()),
+            ]).catch(() => null);
+
+            if (winner) {
+              logger.info({ query, count: winner.results.length, source: winner.source }, 'webSearch results');
+              return { results: winner.results };
+            }
+            return { results: [], note: 'No results — try webFetch with a specific URL' };
+          }
+
+          // No API key: DDG only
+          const results = await searchDDG();
+          if (results.length === 0) {
+            logger.warn({ query }, 'webSearch: no results from DDG');
+            return { results: [], note: 'No results — try webFetch with a specific URL' };
+          }
+          logger.info({ query, count: results.length, source: 'ddg-fallback' }, 'webSearch results');
           return { results };
         } catch (err: any) {
-          return { error: err.message };
+          logger.warn({ query, err: (err as any).message }, 'webSearch failed');
+          return { error: (err as any).message };
         }
       },
     }),
