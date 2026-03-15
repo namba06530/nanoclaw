@@ -112,6 +112,19 @@ export interface AgentCallbacks {
     isRegistered: boolean;
   }>;
   getAllTasks: () => ScheduledTask[];
+  deleteTask: (id: string) => void;
+  updateTask: (
+    id: string,
+    updates: Partial<
+      Pick<ScheduledTask, 'prompt' | 'schedule_type' | 'schedule_value' | 'status'>
+    >,
+  ) => void;
+  registerGroup: (
+    jid: string,
+    name: string,
+    folder: string,
+    trigger: string,
+  ) => void;
 }
 
 // ─── Sandbox lifecycle ────────────────────────────────────────────────────────
@@ -405,6 +418,98 @@ function buildTools(
       },
     }),
 
+    sendMessageTo: tool({
+      description:
+        'Send a Telegram message to a named contact from contacts.json. ' +
+        'This tool handles contact resolution internally — do NOT use readFile to look up contacts first. ' +
+        'IMPORTANT: Before calling this tool, always use sendMessage to show the user ' +
+        'the draft (contact name + message text) and ask for explicit confirmation. ' +
+        'Only call sendMessageTo after the user has confirmed.',
+      inputSchema: z.object({
+        contact_name: z
+          .string()
+          .describe('Name of the contact as defined in contacts.json'),
+        message: z.string().describe('Message text to send'),
+      }),
+      execute: async ({ contact_name, message }) => {
+        try {
+          const contactsPath = path.join(
+            GROUPS_DIR,
+            group.folder,
+            'contacts.json',
+          );
+          if (!fs.existsSync(contactsPath)) {
+            return {
+              error:
+                'contacts.json not found in group folder. Create it with a "contacts" object mapping names to tg:<chatId> JIDs.',
+            };
+          }
+          const raw = JSON.parse(fs.readFileSync(contactsPath, 'utf-8'));
+          const contacts: Record<string, string> = raw.contacts || {};
+
+          const key = Object.keys(contacts).find(
+            (k) => k.toLowerCase() === contact_name.toLowerCase(),
+          );
+          if (!key) {
+            const available = Object.keys(contacts).join(', ') || '(none)';
+            return {
+              error: `Contact "${contact_name}" not found. Available: ${available}`,
+            };
+          }
+
+          const jid = contacts[key];
+          if (!jid.startsWith('tg:')) {
+            return {
+              error: `JID "${jid}" is not a Telegram JID (must start with tg:). Only Telegram is supported.`,
+            };
+          }
+
+          await callbacks.sendMessage(jid, message);
+          return { success: true, sent_to: key, jid };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    ...(input.isMain
+      ? {
+          registerGroup: tool({
+            description:
+              'Register a new chat (Telegram or WhatsApp) so the agent can respond to messages from it. ' +
+              'Use this when the user wants to add a new group or private chat. ' +
+              'The folder name must be unique, lowercase, alphanumeric with hyphens/underscores only.',
+            inputSchema: z.object({
+              jid: z
+                .string()
+                .describe(
+                  'Chat JID — Telegram: "tg:<chatId>", WhatsApp: "<number>@s.whatsapp.net"',
+                ),
+              name: z
+                .string()
+                .describe('Display name for this group (e.g. "Le Clan")'),
+              folder: z
+                .string()
+                .describe(
+                  'Folder name for storage — lowercase, alphanumeric, hyphens/underscores (e.g. "le-clan")',
+                ),
+              trigger: z
+                .string()
+                .default('@Oliv')
+                .describe('Trigger pattern to activate the agent (e.g. "@Oliv")'),
+            }),
+            execute: async ({ jid, name, folder, trigger }) => {
+              try {
+                callbacks.registerGroup(jid, name, folder, trigger);
+                return { success: true, jid, name, folder, trigger };
+              } catch (err: any) {
+                return { error: err.message };
+              }
+            },
+          }),
+        }
+      : {}),
+
     scheduleTask: tool({
       description:
         'Schedule a task to run automatically (cron, interval, or once)',
@@ -444,6 +549,57 @@ function buildTools(
             params,
           );
           return { success: true };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    deleteTask: tool({
+      description:
+        'Permanently delete a scheduled task by its ID. Use when the user wants to cancel or remove a task.',
+      inputSchema: z.object({
+        task_id: z.string().describe('The task ID to delete'),
+      }),
+      execute: async ({ task_id }) => {
+        try {
+          const all = callbacks.getAllTasks();
+          const task = all.find((t) => t.id === task_id);
+          if (!task) return { error: `Task "${task_id}" not found` };
+          callbacks.deleteTask(task_id);
+          return { success: true, deleted: task_id };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    updateTask: tool({
+      description:
+        'Modify a scheduled task: pause it, resume it, change its schedule, or update its prompt.',
+      inputSchema: z.object({
+        task_id: z.string().describe('The task ID to update'),
+        status: z
+          .enum(['active', 'paused'])
+          .optional()
+          .describe('Set to "paused" to pause, "active" to resume'),
+        schedule_type: z
+          .enum(['cron', 'interval', 'once'])
+          .optional()
+          .describe('New schedule type'),
+        schedule_value: z
+          .string()
+          .optional()
+          .describe('New schedule value (cron expr, ms, or ISO datetime)'),
+        prompt: z.string().optional().describe('New prompt/instructions for the task'),
+      }),
+      execute: async ({ task_id, status, schedule_type, schedule_value, prompt }) => {
+        try {
+          const all = callbacks.getAllTasks();
+          const task = all.find((t) => t.id === task_id);
+          if (!task) return { error: `Task "${task_id}" not found` };
+          callbacks.updateTask(task_id, { status, schedule_type, schedule_value, prompt });
+          return { success: true, updated: task_id };
         } catch (err: any) {
           return { error: err.message };
         }
@@ -827,7 +983,7 @@ export async function runAgentEngine(
         if (step.toolCalls?.length) {
           for (const tc of step.toolCalls) {
             logger.info(
-              { group: group.name, tool: tc.toolName, args: (tc as any).args },
+              { group: group.name, tool: tc!.toolName, args: (tc as any).args },
               'Agent tool call',
             );
           }
@@ -837,7 +993,7 @@ export async function runAgentEngine(
             logger.info(
               {
                 group: group.name,
-                tool: tr.toolName,
+                tool: tr!.toolName,
                 result: JSON.stringify((tr as any).result).slice(0, 200),
               },
               'Agent tool result',

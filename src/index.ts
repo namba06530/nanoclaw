@@ -27,6 +27,8 @@ import {
 import { stopAllSandboxes } from './agent-engine.js';
 import {
   createTask,
+  deleteTask,
+  updateTask,
   getAllChats,
   getAllRegisteredGroups,
   getAllTasks,
@@ -338,6 +340,11 @@ function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
     },
     getAvailableGroups,
     getAllTasks,
+    deleteTask,
+    updateTask,
+    registerGroup: (jid: string, name: string, folder: string, trigger: string) => {
+      registerGroup(jid, { name, folder, trigger, added_at: new Date().toISOString() });
+    },
   };
 }
 
