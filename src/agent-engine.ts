@@ -405,6 +405,7 @@ function buildTools(
           ),
       }),
       execute: async ({ path: filePath }) => {
+        logger.info({ path: filePath }, 'readFile called');
         if (!filePath.startsWith('/workspace/')) {
           return { error: 'Access denied: path must start with /workspace/' };
         }
@@ -475,6 +476,7 @@ function buildTools(
           ),
       }),
       execute: async ({ url, format }) => {
+        logger.info({ url, format }, 'webFetch called');
         try {
           if (format === 'json') {
             const res = await fetch(url, {
@@ -514,6 +516,7 @@ function buildTools(
         text: z.string().describe('The message to send'),
       }),
       execute: async ({ text }) => {
+        logger.info('sendMessage called');
         try {
           await callbacks.sendMessage(input.chatJid, text);
           return { success: true };
@@ -673,6 +676,7 @@ function buildTools(
         'List all scheduled tasks. Call this when the user asks about their tasks.',
       inputSchema: z.object({}),
       execute: async () => {
+        logger.info('listTasks called');
         const allTasks = callbacks.getAllTasks();
         const tasks = input.isMain
           ? allTasks
@@ -779,11 +783,31 @@ function buildTools(
               error: 'Unauthorized: can only update tasks from your own group',
             };
           }
+          // Recalculate next_run when schedule changes
+          let next_run: string | undefined;
+          if (schedule_value || schedule_type) {
+            const type = schedule_type || task.schedule_type;
+            const value = schedule_value || task.schedule_value;
+            if (type === 'cron') {
+              const { CronExpressionParser } = await import('cron-parser');
+              const interval = CronExpressionParser.parse(value, {
+                tz: TIMEZONE,
+              });
+              next_run = interval.next().toDate().toISOString();
+            } else if (type === 'interval') {
+              const ms = parseInt(value, 10);
+              next_run = new Date(Date.now() + ms).toISOString();
+            } else if (type === 'once') {
+              next_run = new Date(value).toISOString();
+            }
+          }
+
           callbacks.updateTask(task_id, {
             status,
             schedule_type,
             schedule_value,
             prompt,
+            ...(next_run ? { next_run } : {}),
           });
           return { success: true, updated: task_id };
         } catch (err: any) {
@@ -1066,7 +1090,11 @@ function buildTools(
           }),
 
           gmailSend: tool({
-            description: 'Send a new email via Gmail.',
+            description:
+              'Send a new email via Gmail. ' +
+              'IMPORTANT: Before calling this tool, always use sendMessage to show the user ' +
+              'the draft (recipient, subject, body summary) and ask for explicit confirmation. ' +
+              'Only call gmailSend after the user has confirmed.',
             inputSchema: z.object({
               to: z.string().describe('Recipient email address'),
               subject: z.string().describe('Email subject'),
@@ -1208,6 +1236,7 @@ function buildTools(
                 ),
             }),
             execute: async ({ model }) => {
+              logger.info({ model }, 'setModel called');
               let availableModels: string[] = [];
               try {
                 const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {

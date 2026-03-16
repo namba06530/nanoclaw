@@ -68,30 +68,34 @@ systemctl --user restart nanoclaw
 | `webSearch` | DuckDuckGo search (news, facts, prices, dates) |
 | `webFetch` | HTTP fetch (text or JSON) |
 | `gmailSearch` | Search Gmail inbox with body preview (main group only) |
-| `gmailSend` | Send email (main group only) |
+| `gmailSend` | Send email with confirmation (main group only) |
 | `gmailDelete` | Search and trash a Gmail email (main group only) |
 | `sendMessage` | Send intermediate message to user during work |
-| `scheduleTask` | Create cron/interval/once scheduled tasks |
+| `sendMessageTo` | Send message to a named contact (from contacts.json) |
+| `scheduleTask` | Create cron/interval/once scheduled tasks (always in calling context) |
 | `listTasks` | List scheduled tasks |
 | `deleteTask` | Delete a scheduled task by ID |
+| `updateTask` | Modify a task (schedule, prompt, status) with next_run recalculation |
 | `cancelAllTasks` | Delete all scheduled tasks |
 | `remember` | Save a fact to persistent memory |
-| `setModel` | Change Ollama model at runtime |
+| `setModel` | Change Ollama model at runtime (main group only) |
 
 ## System Prompt & Tool Routing
 
-Le system prompt de l'agent est construit en couches dans `buildSystemPrompt()` (`src/agent-engine.ts` L212+) :
+Le system prompt de l'agent est construit en couches dans `buildSystemPrompt()` (`src/agent-engine.ts` L255+) :
 
-1. `groups/global/CLAUDE.md` — instructions communes (langue, ton, formatting, météo)
+1. `groups/global/CLAUDE.md` — instructions communes (langue, ton, personnalité, météo)
 2. `groups/{name}/CLAUDE.md` — instructions par groupe (override)
-3. Section hardcodée "CRITICAL: Tool Usage" — routes tool et règles anti-boucle
+3. Section hardcodée "CRITICAL: Tool Usage" (L277+) — routes tool et règles anti-boucle
 
-**Routes tool** (section hardcodée, L233+) : quand un nouveau tool est ajouté, il faut aussi ajouter sa route dans cette section pour que le LLM sache quand l'utiliser. Format : `• User intent → toolName(...)`.
+**Routes tool** (section hardcodée) : quand un nouveau tool est ajouté, il faut aussi ajouter sa route dans cette section pour que le LLM sache quand l'utiliser. Format : `• User intent → toolName(...)`.
 
 **Règles comportementales** (même section) :
 - Agir immédiatement si la requête est claire, sinon demander clarification
 - Anti-boucle : max 3 tool calls sans résultat → stop et demande à l'utilisateur
 - Jamais le même type de tool 2+ fois de suite
+
+**Sécurité tâches planifiées** : quand `isScheduledTask=true`, les tools de gestion (scheduleTask, deleteTask, cancelAllTasks, updateTask, clearHistory, registerGroup, setModel) sont retirés pour empêcher les cascades.
 
 ## Configuration (.env)
 
