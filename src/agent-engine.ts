@@ -646,7 +646,14 @@ function buildTools(
           ),
       }),
       execute: async (params) => {
-        logger.info({ prompt: params.prompt.slice(0, 80), schedule_type: params.schedule_type, schedule_value: params.schedule_value }, 'scheduleTask called');
+        logger.info(
+          {
+            prompt: params.prompt.slice(0, 80),
+            schedule_type: params.schedule_type,
+            schedule_value: params.schedule_value,
+          },
+          'scheduleTask called',
+        );
         try {
           await callbacks.scheduleTask(
             group.folder,
