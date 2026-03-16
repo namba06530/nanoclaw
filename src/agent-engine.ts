@@ -142,7 +142,6 @@ export interface ScheduleParams {
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
   context_mode?: 'group' | 'isolated' | 'watch';
-  target_group_jid?: string;
 }
 
 export interface AgentCallbacks {
@@ -285,6 +284,7 @@ function buildSystemPrompt(
       '• Delete email → gmailDelete(keyword). Single match = trashed. Multiple matches = refine query.\n' +
       '• Tasks → listTasks()\n' +
       '• Schedule → scheduleTask(...) → wait for result → confirm\n' +
+      '• Modify/update task → listTasks() first to get the task ID, then updateTask(task_id, ...) to change schedule, prompt, or status. NEVER create a new task to replace an existing one.\n' +
       '• Delete tasks → deleteTask(id) or cancelAllTasks() → wait → confirm\n' +
       '• Send email → gmailSend(...) → wait → confirm\n' +
       '• Save/remember → remember(...) → wait → confirm\n' +
@@ -369,7 +369,7 @@ function buildTools(
   input: ContainerInput,
   callbacks: AgentCallbacks,
 ) {
-  return {
+  const tools: Record<string, any> = {
     bash: tool({
       description:
         'Execute a bash command in the isolated sandbox container. Working directory is /workspace/group.',
@@ -377,6 +377,7 @@ function buildTools(
         command: z.string().describe('The bash command to execute'),
       }),
       execute: async ({ command }) => {
+        logger.info({ command: command.slice(0, 100) }, 'bash called');
         try {
           const { stdout, stderr } = await execAsync(
             `docker exec -w /workspace/group ${containerName} bash -c ${JSON.stringify(command)}`,
@@ -430,6 +431,7 @@ function buildTools(
         content: z.string().describe('Content to write'),
       }),
       execute: async ({ path: filePath, content }) => {
+        logger.info({ path: filePath }, 'writeFile called');
         if (!filePath.startsWith('/workspace/group/')) {
           return {
             error: 'Access denied: can only write to /workspace/group/',
@@ -535,6 +537,7 @@ function buildTools(
         message: z.string().describe('Message text to send'),
       }),
       execute: async ({ contact_name, message }) => {
+        logger.info({ contact_name }, 'sendMessageTo called');
         try {
           const contactsPath = path.join(
             GROUPS_DIR,
@@ -604,6 +607,7 @@ function buildTools(
                 ),
             }),
             execute: async ({ jid, name, folder, trigger }) => {
+              logger.info({ jid, name, folder }, 'registerGroup called');
               try {
                 callbacks.registerGroup(jid, name, folder, trigger);
                 return { success: true, jid, name, folder, trigger };
@@ -617,7 +621,7 @@ function buildTools(
 
     scheduleTask: tool({
       description:
-        'Schedule a task to run automatically (cron, interval, or once)',
+        'Schedule a task to run automatically (cron, interval, or once). The task is always created in the current conversation context.',
       inputSchema: z.object({
         prompt: z
           .string()
@@ -640,14 +644,9 @@ function buildTools(
               'isolated: auto-sends output, fresh session. ' +
               'watch: suppresses auto-send — agent uses sendMessage tool only when condition is met.',
           ),
-        target_group_jid: z
-          .string()
-          .optional()
-          .describe(
-            'Target group JID (main group only, to schedule for other groups)',
-          ),
       }),
       execute: async (params) => {
+        logger.info({ prompt: params.prompt.slice(0, 80), schedule_type: params.schedule_type, schedule_value: params.schedule_value }, 'scheduleTask called');
         try {
           await callbacks.scheduleTask(
             group.folder,
@@ -694,6 +693,7 @@ function buildTools(
         task_id: z.string().describe('The task ID to delete'),
       }),
       execute: async ({ task_id }) => {
+        logger.info({ task_id }, 'deleteTask called');
         try {
           const all = callbacks.getAllTasks();
           const task = all.find((t) => t.id === task_id);
@@ -716,6 +716,7 @@ function buildTools(
         'Cancel and delete ALL scheduled tasks in a single call. Use this when the user wants to stop or remove all tasks — do NOT loop deleteTask manually.',
       inputSchema: z.object({}),
       execute: async () => {
+        logger.info('cancelAllTasks called');
         try {
           // Main group: delete all visible tasks; non-main: own group only
           const allTasks = callbacks.getAllTasks();
@@ -761,6 +762,7 @@ function buildTools(
         schedule_value,
         prompt,
       }) => {
+        logger.info({ task_id, status }, 'updateTask called');
         try {
           const all = callbacks.getAllTasks();
           const task = all.find((t) => t.id === task_id);
@@ -788,6 +790,7 @@ function buildTools(
         'Clear the conversation history for this group — use when the user asks to forget, reset, or start fresh',
       inputSchema: z.object({}),
       execute: async () => {
+        logger.info('clearHistory called');
         clearConversationHistory(group.folder);
         return { success: true, message: 'Conversation history cleared' };
       },
@@ -805,6 +808,7 @@ function buildTools(
           .describe('Value to store. Pass empty string to delete the key.'),
       }),
       execute: async ({ key, value }) => {
+        logger.info({ key }, 'remember called');
         const memFile = path.join(
           resolveGroupFolderPath(group.folder),
           'memory.json',
@@ -978,7 +982,7 @@ function buildTools(
               'Use simple keywords to search broadly (e.g. "digitalocean" searches from, subject AND body). ' +
               'Never invent a full email address — use just the domain or keyword. ' +
               'Examples: "digitalocean", "is:unread", "from:amazon", "subject:facture". ' +
-              'The body preview (up to 800 chars) is included — you do NOT need to call gmailRead for basic summaries.',
+              'The body preview (up to 800 chars) is included — no second call needed to read the email.',
             inputSchema: z.object({
               query: z
                 .string()
@@ -1230,6 +1234,20 @@ function buildTools(
         }
       : {}),
   };
+
+  // Scheduled tasks: strip tools that manage tasks or system config
+  // to prevent cascading task creation and uncontrolled modifications.
+  if (input.isScheduledTask) {
+    delete tools.scheduleTask;
+    delete tools.deleteTask;
+    delete tools.cancelAllTasks;
+    delete tools.updateTask;
+    delete tools.clearHistory;
+    delete tools.registerGroup;
+    delete tools.setModel;
+  }
+
+  return tools;
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────

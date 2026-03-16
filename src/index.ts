@@ -296,23 +296,12 @@ function buildAgentCallbacks(
     },
     scheduleTask: async (
       groupFolder: string,
-      isMain: boolean,
+      _isMain: boolean,
       chatJid: string,
       params,
     ) => {
-      const targetJid = params.target_group_jid || chatJid;
-      const targetGroup = registeredGroups[targetJid];
-      if (!targetGroup) {
-        throw new Error(
-          `Cannot schedule task: group not registered for JID ${targetJid}`,
-        );
-      }
-      // Authorization: non-main groups can only schedule for themselves
-      if (!isMain && targetGroup.folder !== groupFolder) {
-        throw new Error(
-          'Unauthorized: non-main group cannot schedule for other groups',
-        );
-      }
+      // Task is always created in the calling group's context.
+      // No target_group_jid override — prevents LLM from sending tasks to wrong groups.
       const scheduleType = params.schedule_type;
       let nextRun: string | null = null;
       if (scheduleType === 'cron') {
@@ -329,8 +318,8 @@ function buildAgentCallbacks(
       const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       createTask({
         id: taskId,
-        group_folder: targetGroup.folder,
-        chat_jid: targetJid,
+        group_folder: groupFolder,
+        chat_jid: chatJid,
         prompt: params.prompt,
         schedule_type: scheduleType,
         schedule_value: params.schedule_value,
@@ -340,7 +329,7 @@ function buildAgentCallbacks(
         created_at: new Date().toISOString(),
       });
       logger.info(
-        { taskId, groupFolder, targetJid, scheduleType },
+        { taskId, groupFolder, chatJid, scheduleType },
         'Task scheduled via agent',
       );
     },

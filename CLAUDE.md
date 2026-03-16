@@ -67,9 +67,9 @@ systemctl --user restart nanoclaw
 | `writeFile` | Write files to `/workspace/group` |
 | `webSearch` | DuckDuckGo search (news, facts, prices, dates) |
 | `webFetch` | HTTP fetch (text or JSON) |
-| `gmailSearch` | Search user's Gmail inbox (main group only) |
-| `gmailRead` | Read a specific email by ID (main group only) |
+| `gmailSearch` | Search Gmail inbox with body preview (main group only) |
 | `gmailSend` | Send email (main group only) |
+| `gmailDelete` | Search and trash a Gmail email (main group only) |
 | `sendMessage` | Send intermediate message to user during work |
 | `scheduleTask` | Create cron/interval/once scheduled tasks |
 | `listTasks` | List scheduled tasks |
