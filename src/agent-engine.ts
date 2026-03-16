@@ -54,6 +54,33 @@ const BASH_TIMEOUT_MS = 30_000;
 
 // ─── Gmail helper ─────────────────────────────────────────────────────────────
 
+// Convert French dates in a query to Gmail date operators
+// "digitalocean 13 mars" → "digitalocean after:2026/03/12 before:2026/03/14"
+// "edf 17 mars 2026" → "edf after:2026/03/16 before:2026/03/18"
+const FRENCH_MONTHS: Record<string, number> = {
+  janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5, juin: 6,
+  juillet: 7, août: 8, aout: 8, septembre: 9, octobre: 10, novembre: 11, décembre: 12, decembre: 12,
+};
+
+function preprocessGmailQuery(query: string): string {
+  const monthPattern = Object.keys(FRENCH_MONTHS).join('|');
+  const dateRegex = new RegExp(`(\\d{1,2})\\s+(${monthPattern})(?:\\s+(\\d{4}))?`, 'i');
+  const match = query.match(dateRegex);
+  if (!match) return query;
+
+  const day = parseInt(match[1]);
+  const month = FRENCH_MONTHS[match[2].toLowerCase()];
+  const year = match[3] ? parseInt(match[3]) : new Date().getFullYear();
+
+  const target = new Date(year, month - 1, day);
+  const before = new Date(target);
+  before.setDate(before.getDate() + 1);
+
+  const fmt = (d: Date) => `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+  const cleaned = query.replace(match[0], '').trim();
+  return `${cleaned} after:${fmt(target)} before:${fmt(before)}`;
+}
+
 // Singleton — one client per process to avoid token refresh conflicts
 let _gmailClient: ReturnType<typeof google.gmail> | null = null;
 
@@ -117,7 +144,6 @@ export interface AgentCallbacks {
   }>;
   getAllTasks: () => ScheduledTask[];
   deleteTask: (id: string) => void;
-  cancelAllTasks: () => number;
   updateTask: (
     id: string,
     updates: Partial<
@@ -230,18 +256,28 @@ function buildSystemPrompt(
     parts.push('\n\n---\n\n' + fs.readFileSync(groupMd, 'utf-8'));
   }
 
-  // CRITICAL: Tool usage instructions — placed early for 14b model attention
+  // CRITICAL: Tool usage instructions — placed early for model attention
   parts.push(
     '\n\n## CRITICAL: Tool Usage\n' +
-      'You MUST call a tool for every state-changing action. The action does NOT happen until the tool returns a result.\n\n' +
-      'Required sequences — follow exactly:\n' +
-      '• User asks about tasks → call listTasks() → report the result\n' +
-      '• User asks to delete all tasks → call cancelAllTasks() → wait for {success:true, cancelled:N} → confirm\n' +
-      '• User asks to delete one task → call deleteTask(id) → wait for {success:true} → confirm\n' +
-      '• User asks to schedule something → call scheduleTask(...) → wait for result → confirm\n' +
-      '• User asks to send email → call gmailSend(...) → wait for result → confirm\n' +
-      '• User asks to save/remember something → call remember(...) → wait for result → confirm\n\n' +
-      'NEVER confirm success BEFORE receiving the tool result. If you did not call the tool, the action did NOT happen.',
+      'You MUST call a tool for every state-changing action. The action does NOT happen until the tool returns a result.\n' +
+      'NEVER fabricate factual data — if you did not search, you do not know.\n' +
+      'NEVER confirm success BEFORE receiving the tool result.\n\n' +
+      'Required tool routing — always use the most specific tool:\n' +
+      '• Weather → webFetch("https://wttr.in/{city}?format=j1")\n' +
+      '• Emails/mails → gmailSearch(keyword). Body preview included — summarize directly.\n' +
+      '• Delete email → gmailDelete(keyword). Single match = trashed. Multiple matches = refine query.\n' +
+      '• Tasks → listTasks()\n' +
+      '• Schedule → scheduleTask(...) → wait for result → confirm\n' +
+      '• Delete tasks → deleteTask(id) or cancelAllTasks() → wait → confirm\n' +
+      '• Send email → gmailSend(...) → wait → confirm\n' +
+      '• Save/remember → remember(...) → wait → confirm\n' +
+      '• News, scores, dates, prices, facts → webSearch([query]) → report\n\n' +
+      'Act immediately — do NOT ask "do you want me to check?" Pick the most specific tool and proceed.\n' +
+      'Ask the user to clarify ONLY when you genuinely cannot determine what they want.\n\n' +
+      'ANTI-LOOP: If after 3 tool calls you still do not have a good answer, STOP.\n' +
+      'Tell the user what you tried and ask how to proceed.\n' +
+      'Never call the same tool type (e.g. webFetch) more than 2 times in a row.\n' +
+      'If a tool returns 0 results or an error, ALWAYS tell the user explicitly what you searched and that nothing was found. Never send an empty response.',
   );
 
   // Persistent memory (memory.json in group folder)
@@ -585,7 +621,7 @@ function buildTools(
           .describe(
             'group: auto-sends output, uses conversation context. ' +
               'isolated: auto-sends output, fresh session. ' +
-              "watch: suppresses auto-send — agent uses sendMessage tool only when condition is met.",
+              'watch: suppresses auto-send — agent uses sendMessage tool only when condition is met.',
           ),
         target_group_jid: z
           .string()
@@ -646,7 +682,9 @@ function buildTools(
           const task = all.find((t) => t.id === task_id);
           if (!task) return { error: `Task "${task_id}" not found` };
           if (!input.isMain && task.group_folder !== group.folder) {
-            return { error: 'Unauthorized: can only delete tasks from your own group' };
+            return {
+              error: 'Unauthorized: can only delete tasks from your own group',
+            };
           }
           callbacks.deleteTask(task_id);
           return { success: true, deleted: task_id };
@@ -711,7 +749,9 @@ function buildTools(
           const task = all.find((t) => t.id === task_id);
           if (!task) return { error: `Task "${task_id}" not found` };
           if (!input.isMain && task.group_folder !== group.folder) {
-            return { error: 'Unauthorized: can only update tasks from your own group' };
+            return {
+              error: 'Unauthorized: can only update tasks from your own group',
+            };
           }
           callbacks.updateTask(task_id, {
             status,
@@ -913,17 +953,25 @@ function buildTools(
       },
     }),
 
-    gmailSearch: tool({
+    ...(input.isMain
+      ? {
+          gmailSearch: tool({
       description:
-        'Search or list Gmail emails. Returns a list with sender, subject, date and snippet. Use Gmail search syntax for the query (e.g. "is:unread", "from:boss@company.com", "subject:invoice").',
+        'Search or list Gmail emails. Returns sender, subject, date and body preview for each result. ' +
+        'Use simple keywords to search broadly (e.g. "digitalocean" searches from, subject AND body). ' +
+        'Never invent a full email address — use just the domain or keyword. ' +
+        'Examples: "digitalocean", "is:unread", "from:amazon", "subject:facture". ' +
+        'The body preview (up to 800 chars) is included — you do NOT need to call gmailRead for basic summaries.',
       inputSchema: z.object({
         query: z
           .string()
           .default('in:inbox')
           .describe('Gmail search query. Default: "in:inbox"'),
-        maxResults: z.number().default(10).describe('Max number of results'),
+        maxResults: z.number().default(5).describe('Max number of results'),
       }),
-      execute: async ({ query, maxResults }) => {
+      execute: async ({ query: rawQuery, maxResults }) => {
+        const query = preprocessGmailQuery(rawQuery);
+        logger.info({ rawQuery, query, maxResults }, 'gmailSearch called');
         const gmail = createGmailClient();
         if (!gmail) return { error: 'Gmail not configured' };
         try {
@@ -935,55 +983,6 @@ function buildTools(
           const messages = list.data.messages || [];
           if (messages.length === 0) return { results: [] };
 
-          const results = await Promise.all(
-            messages.map(async (m) => {
-              const msg = await gmail.users.messages.get({
-                userId: 'me',
-                id: m.id!,
-                format: 'metadata',
-                metadataHeaders: ['From', 'Subject', 'Date'],
-              });
-              const h = (name: string) =>
-                msg.data.payload?.headers?.find(
-                  (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
-                )?.value || '';
-              return {
-                id: m.id,
-                from: h('From'),
-                subject: h('Subject'),
-                date: h('Date'),
-                snippet: msg.data.snippet || '',
-              };
-            }),
-          );
-          return { results };
-        } catch (err: any) {
-          return { error: err.message };
-        }
-      },
-    }),
-
-    gmailRead: tool({
-      description: 'Read the full content of a Gmail email by its message ID.',
-      inputSchema: z.object({
-        messageId: z.string().describe('Gmail message ID'),
-      }),
-      execute: async ({ messageId }) => {
-        const gmail = createGmailClient();
-        if (!gmail) return { error: 'Gmail not configured' };
-        try {
-          const msg = await gmail.users.messages.get({
-            userId: 'me',
-            id: messageId,
-            format: 'full',
-          });
-          const h = (name: string) =>
-            msg.data.payload?.headers?.find(
-              (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
-            )?.value || '';
-
-          // Extract text body
-          let body = '';
           const extractBody = (part: any): string => {
             if (part.mimeType === 'text/plain' && part.body?.data) {
               return Buffer.from(part.body.data, 'base64').toString('utf-8');
@@ -996,17 +995,32 @@ function buildTools(
             }
             return '';
           };
-          body = extractBody(msg.data.payload || {});
 
-          return {
-            id: messageId,
-            from: h('From'),
-            to: h('To'),
-            subject: h('Subject'),
-            date: h('Date'),
-            body: body.slice(0, 4000),
-          };
+          const results = await Promise.all(
+            messages.map(async (m) => {
+              const msg = await gmail.users.messages.get({
+                userId: 'me',
+                id: m.id!,
+                format: 'full',
+              });
+              const h = (name: string) =>
+                msg.data.payload?.headers?.find(
+                  (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
+                )?.value || '';
+              const body = extractBody(msg.data.payload || {}).slice(0, 800);
+              return {
+                id: m.id,
+                from: h('From'),
+                subject: h('Subject'),
+                date: h('Date'),
+                body: body || msg.data.snippet || '',
+              };
+            }),
+          );
+          logger.info({ count: results.length }, 'gmailSearch results');
+          return { results };
         } catch (err: any) {
+          logger.error({ err: err.message }, 'gmailSearch error');
           return { error: err.message };
         }
       },
@@ -1046,6 +1060,55 @@ function buildTools(
           return { success: true, to, subject };
         } catch (err: any) {
           logger.error({ to, subject, error: err.message }, 'gmailSend failed');
+          return { error: err.message };
+        }
+      },
+    }),
+
+    gmailDelete: tool({
+      description:
+        'Search for a Gmail email and move it to trash (recoverable for 30 days). ' +
+        'Be SPECIFIC with your keywords to match exactly one email (e.g. "edf tempo 16 mars", not just "edf"). ' +
+        'If exactly one email matches, it is trashed. ' +
+        'If multiple match, nothing is deleted — the tool returns the list so you can refine your query with more specific keywords or a date.',
+      inputSchema: z.object({
+        query: z.string().describe('Specific Gmail search keywords to identify the email to delete'),
+      }),
+      execute: async ({ query: rawQuery }) => {
+        const query = preprocessGmailQuery(rawQuery);
+        const gmail = createGmailClient();
+        if (!gmail) return { error: 'Gmail not configured' };
+        logger.info({ rawQuery, query }, 'gmailDelete called');
+        try {
+          const list = await gmail.users.messages.list({ userId: 'me', q: query, maxResults: 5 });
+          const messages = list.data.messages || [];
+          if (messages.length === 0) return { error: 'No email found matching this query.' };
+          if (messages.length > 1) {
+            const summaries = await Promise.all(
+              messages.map(async (m) => {
+                const msg = await gmail.users.messages.get({
+                  userId: 'me', id: m.id!, format: 'metadata',
+                  metadataHeaders: ['From', 'Subject', 'Date'],
+                });
+                const h = (name: string) =>
+                  msg.data.payload?.headers?.find((hdr) => hdr.name?.toLowerCase() === name.toLowerCase())?.value || '';
+                return { from: h('From'), subject: h('Subject'), date: h('Date') };
+              }),
+            );
+            return { tooMany: true, count: summaries.length, matches: summaries, hint: 'Add a date or more keywords to match exactly one email.' };
+          }
+          const id = messages[0].id!;
+          const msg = await gmail.users.messages.get({
+            userId: 'me', id, format: 'metadata',
+            metadataHeaders: ['From', 'Subject', 'Date'],
+          });
+          const h = (name: string) =>
+            msg.data.payload?.headers?.find((hdr) => hdr.name?.toLowerCase() === name.toLowerCase())?.value || '';
+          await gmail.users.messages.trash({ userId: 'me', id });
+          logger.info({ id, subject: h('Subject') }, 'gmailDelete success');
+          return { success: true, trashed: { from: h('From'), subject: h('Subject'), date: h('Date') } };
+        } catch (err: any) {
+          logger.error({ query, err: err.message }, 'gmailDelete error');
           return { error: err.message };
         }
       },
@@ -1093,6 +1156,8 @@ function buildTools(
         return { success: true, currentModel, availableModels };
       },
     }),
+        }
+      : {}),
   };
 }
 
@@ -1132,7 +1197,12 @@ export async function runAgentEngine(
 
   // 3. Build prompt components
   const ollama = createOllama({ baseURL: `${OLLAMA_BASE_URL}/api` });
-  const systemPrompt = buildSystemPrompt(group, input.isMain, callbacks, input.isScheduledTask);
+  const systemPrompt = buildSystemPrompt(
+    group,
+    input.isMain,
+    callbacks,
+    input.isScheduledTask,
+  );
   const tools = buildTools(containerName, group, input, callbacks);
 
   logger.info(

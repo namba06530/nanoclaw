@@ -83,7 +83,7 @@ export const OLLAMA_BASE_URL =
 export const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'qwen2.5:14b-instruct';
 export const AGENT_MAX_STEPS = parseInt(
-  process.env.AGENT_MAX_STEPS || envConfig.AGENT_MAX_STEPS || '50',
+  process.env.AGENT_MAX_STEPS || envConfig.AGENT_MAX_STEPS || '15',
   10,
 );
 export const CONVERSATION_HISTORY_TURNS = parseInt(
