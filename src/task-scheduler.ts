@@ -10,6 +10,7 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
+  cancelAllTasksForGroup,
   getAllTasks,
   getDueTasks,
   getTaskById,
@@ -180,8 +181,10 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          // Watch tasks: agent sends via sendMessage tool only when condition is met
+          if (task.context_mode !== 'watch') {
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
@@ -192,7 +195,10 @@ async function runTask(
           error = streamedOutput.error || 'Unknown error';
         }
       },
-      deps.agentCallbacks,
+      {
+        ...deps.agentCallbacks,
+        cancelAllTasks: () => cancelAllTasksForGroup(task.group_folder),
+      },
     );
 
     if (closeTimer) clearTimeout(closeTimer);

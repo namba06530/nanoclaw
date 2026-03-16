@@ -97,7 +97,7 @@ export interface ScheduleParams {
   prompt: string;
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
-  context_mode?: 'group' | 'isolated';
+  context_mode?: 'group' | 'isolated' | 'watch';
   target_group_jid?: string;
 }
 
@@ -117,6 +117,7 @@ export interface AgentCallbacks {
   }>;
   getAllTasks: () => ScheduledTask[];
   deleteTask: (id: string) => void;
+  cancelAllTasks: () => number;
   updateTask: (
     id: string,
     updates: Partial<
@@ -213,6 +214,7 @@ function buildSystemPrompt(
   group: RegisteredGroup,
   isMain: boolean,
   callbacks: AgentCallbacks,
+  isScheduledTask = false,
 ): string {
   const parts: string[] = [];
 
@@ -227,6 +229,20 @@ function buildSystemPrompt(
   if (fs.existsSync(groupMd)) {
     parts.push('\n\n---\n\n' + fs.readFileSync(groupMd, 'utf-8'));
   }
+
+  // CRITICAL: Tool usage instructions — placed early for 14b model attention
+  parts.push(
+    '\n\n## CRITICAL: Tool Usage\n' +
+      'You MUST call a tool for every state-changing action. The action does NOT happen until the tool returns a result.\n\n' +
+      'Required sequences — follow exactly:\n' +
+      '• User asks about tasks → call listTasks() → report the result\n' +
+      '• User asks to delete all tasks → call cancelAllTasks() → wait for {success:true, cancelled:N} → confirm\n' +
+      '• User asks to delete one task → call deleteTask(id) → wait for {success:true} → confirm\n' +
+      '• User asks to schedule something → call scheduleTask(...) → wait for result → confirm\n' +
+      '• User asks to send email → call gmailSend(...) → wait for result → confirm\n' +
+      '• User asks to save/remember something → call remember(...) → wait for result → confirm\n\n' +
+      'NEVER confirm success BEFORE receiving the tool result. If you did not call the tool, the action did NOT happen.',
+  );
 
   // Persistent memory (memory.json in group folder)
   const memoryFile = path.join(
@@ -246,14 +262,12 @@ function buildSystemPrompt(
     }
   }
 
-  // Scheduled tasks context
-  const allTasks = callbacks.getAllTasks();
-  const tasks = isMain
-    ? allTasks
-    : allTasks.filter((t) => t.group_folder === group.folder);
-  if (tasks.length > 0) {
-    parts.push('\n\n## Scheduled Tasks\n' + JSON.stringify(tasks, null, 2));
-  }
+  // Scheduled tasks — tool-only access (no JSON injection)
+  parts.push(
+    '\n\n## Scheduled Tasks\n' +
+      'Use the listTasks tool to view current tasks. ' +
+      'Use deleteTask, cancelAllTasks, updateTask, or scheduleTask to modify them.',
+  );
 
   // Available groups (main only)
   if (isMain) {
@@ -261,22 +275,30 @@ function buildSystemPrompt(
     parts.push('\n\n## Available Groups\n' + JSON.stringify(groups, null, 2));
   }
 
-  // Instructions for brevity, memory, and tool usage
+  // Scheduled task context
+  if (isScheduledTask) {
+    parts.push(
+      '\n\n## Scheduled Task Execution\n' +
+        'You are running as a scheduled task. ' +
+        'Your text output is automatically sent to the user — UNLESS this is a watch task.\n' +
+        'For watch tasks: follow the task prompt exactly. ' +
+        'Use the sendMessage tool ONLY if the monitored condition is met. ' +
+        'Return nothing (no text output) if the condition is not triggered.',
+    );
+  }
+
+  // Memory instructions, response style, attached files
   parts.push(
-    '\n\n## Persistent Memory\n' +
+    '\n\n## Proactive Memory\n' +
       'You have a `remember` tool to save information across conversations. ' +
       'Use it proactively whenever you learn something useful about a user: ' +
-      "their city, preferences, favorite teams, habits, recurring requests, etc. " +
+      'their city, preferences, favorite teams, habits, recurring requests, etc. ' +
       'Use descriptive keys, e.g. "fab_city", "olivier_football_team", "preferred_language". ' +
       "Do NOT save ephemeral info (today's weather, one-off sports results).\n\n" +
       '## Response Instructions\n' +
       'Be concise. Use the language of the user. ' +
       'Do not add unnecessary disclaimers or repetition. ' +
       'For messaging apps: keep responses short unless detail is explicitly requested.\n\n' +
-      '## CRITICAL: Tool Usage\n' +
-      'You MUST use your tools to perform actions. NEVER pretend to have performed an action without calling the appropriate tool. ' +
-      'Every email send requires a gmailSend tool call. Every file read requires a readFile tool call. ' +
-      "If a user asks you to do something and you have a tool for it, you MUST call the tool — do NOT simulate or hallucinate the result.\n\n" +
       '## Attached files\n' +
       'When a message starts with `Fichier joint "nom" :`, the file content has already been extracted and is provided directly in the message. ' +
       'Read and use it directly — no tool needed. ' +
@@ -558,10 +580,12 @@ function buildTools(
             'Value: cron expr (e.g. "0 9 * * *"), ms (e.g. "3600000"), or ISO datetime',
           ),
         context_mode: z
-          .enum(['group', 'isolated'])
+          .enum(['group', 'isolated', 'watch'])
           .default('group')
           .describe(
-            'group: uses conversation context, isolated: fresh session',
+            'group: auto-sends output, uses conversation context. ' +
+              'isolated: auto-sends output, fresh session. ' +
+              "watch: suppresses auto-send — agent uses sendMessage tool only when condition is met.",
           ),
         target_group_jid: z
           .string()
@@ -585,9 +609,34 @@ function buildTools(
       },
     }),
 
+    listTasks: tool({
+      description:
+        'List all scheduled tasks. Call this when the user asks about their tasks.',
+      inputSchema: z.object({}),
+      execute: async () => {
+        const allTasks = callbacks.getAllTasks();
+        const tasks = input.isMain
+          ? allTasks
+          : allTasks.filter((t) => t.group_folder === group.folder);
+        if (tasks.length === 0) {
+          return { tasks: [], message: 'No scheduled tasks' };
+        }
+        return {
+          tasks: tasks.map((t) => ({
+            id: t.id,
+            prompt: t.prompt.slice(0, 100),
+            schedule: `${t.schedule_type}: ${t.schedule_value}`,
+            status: t.status,
+            context_mode: t.context_mode,
+            next_run: t.next_run,
+          })),
+        };
+      },
+    }),
+
     deleteTask: tool({
       description:
-        'Permanently delete a scheduled task by its ID. Use when the user wants to cancel or remove a task.',
+        'Permanently delete a scheduled task by its ID. Use when the user wants to cancel or remove a specific task.',
       inputSchema: z.object({
         task_id: z.string().describe('The task ID to delete'),
       }),
@@ -596,8 +645,32 @@ function buildTools(
           const all = callbacks.getAllTasks();
           const task = all.find((t) => t.id === task_id);
           if (!task) return { error: `Task "${task_id}" not found` };
+          if (!input.isMain && task.group_folder !== group.folder) {
+            return { error: 'Unauthorized: can only delete tasks from your own group' };
+          }
           callbacks.deleteTask(task_id);
           return { success: true, deleted: task_id };
+        } catch (err: any) {
+          return { error: err.message };
+        }
+      },
+    }),
+
+    cancelAllTasks: tool({
+      description:
+        'Cancel and delete ALL scheduled tasks in a single call. Use this when the user wants to stop or remove all tasks — do NOT loop deleteTask manually.',
+      inputSchema: z.object({}),
+      execute: async () => {
+        try {
+          // Main group: delete all visible tasks; non-main: own group only
+          const allTasks = callbacks.getAllTasks();
+          const targets = input.isMain
+            ? allTasks
+            : allTasks.filter((t) => t.group_folder === group.folder);
+          for (const t of targets) {
+            callbacks.deleteTask(t.id);
+          }
+          return { success: true, cancelled: targets.length };
         } catch (err: any) {
           return { error: err.message };
         }
@@ -637,6 +710,9 @@ function buildTools(
           const all = callbacks.getAllTasks();
           const task = all.find((t) => t.id === task_id);
           if (!task) return { error: `Task "${task_id}" not found` };
+          if (!input.isMain && task.group_folder !== group.folder) {
+            return { error: 'Unauthorized: can only update tasks from your own group' };
+          }
           callbacks.updateTask(task_id, {
             status,
             schedule_type,
@@ -723,7 +799,10 @@ function buildTools(
         const searchDDG = async () => {
           const jinaUrl = `https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encoded}`;
           const res = await fetch(jinaUrl, {
-            headers: { 'User-Agent': 'NanoClaw/1.0', 'X-Retain-Images': 'none' },
+            headers: {
+              'User-Agent': 'NanoClaw/1.0',
+              'X-Retain-Images': 'none',
+            },
             signal: AbortSignal.timeout(15_000),
           });
           const markdown = await res.text();
@@ -736,7 +815,11 @@ function buildTools(
           while ((match = linkPattern.exec(markdown)) !== null) {
             const text = match[1].trim();
             const realUrl = decodeURIComponent(match[2]);
-            if (!realUrl.startsWith('http') || realUrl.includes('duckduckgo.com')) continue;
+            if (
+              !realUrl.startsWith('http') ||
+              realUrl.includes('duckduckgo.com')
+            )
+              continue;
             const existing = byUrl.get(realUrl);
             if (!existing) {
               byUrl.set(realUrl, { title: text, snippet: '' });
@@ -1049,7 +1132,7 @@ export async function runAgentEngine(
 
   // 3. Build prompt components
   const ollama = createOllama({ baseURL: `${OLLAMA_BASE_URL}/api` });
-  const systemPrompt = buildSystemPrompt(group, input.isMain, callbacks);
+  const systemPrompt = buildSystemPrompt(group, input.isMain, callbacks, input.isScheduledTask);
   const tools = buildTools(containerName, group, input, callbacks);
 
   logger.info(
@@ -1135,7 +1218,16 @@ export async function runAgentEngine(
 
     // 5. Persist conversation turn (skip scheduled tasks — isolated context)
     if (result.text && !input.isScheduledTask) {
-      storeConversationTurn(group.folder, input.prompt, result.text);
+      const toolSummary = result.steps
+        .flatMap((s) => s.toolCalls ?? [])
+        .map((tc) => tc!.toolName)
+        .join(', ');
+      storeConversationTurn(
+        group.folder,
+        input.prompt,
+        result.text,
+        toolSummary || undefined,
+      );
     }
 
     // 6. Archive conversation

@@ -28,6 +28,7 @@ import { stopAllSandboxes } from './agent-engine.js';
 import {
   createTask,
   deleteTask,
+  cancelAllTasksForGroup,
   updateTask,
   getAllChats,
   getAllRegisteredGroups,
@@ -277,7 +278,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   return true;
 }
 
-function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
+function buildAgentCallbacks(chatJidForSend?: string, groupFolder?: string): AgentCallbacks {
   return {
     sendMessage: async (jid: string, text: string) => {
       const channel = findChannel(channels, jid);
@@ -341,6 +342,7 @@ function buildAgentCallbacks(chatJidForSend?: string): AgentCallbacks {
     getAvailableGroups,
     getAllTasks,
     deleteTask,
+    cancelAllTasks: () => cancelAllTasksForGroup(groupFolder ?? ''),
     updateTask,
     registerGroup: (
       jid: string,
@@ -408,7 +410,7 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       onOutput,
-      buildAgentCallbacks(chatJid),
+      buildAgentCallbacks(chatJid, group.folder),
     );
 
     if (output.status === 'error') {

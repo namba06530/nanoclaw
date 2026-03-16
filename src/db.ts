@@ -133,6 +133,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add tool_data column to conversation_history (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE conversation_history ADD COLUMN tool_data TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add image_data column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE messages ADD COLUMN image_data TEXT`);
@@ -486,6 +495,19 @@ export function deleteTask(id: string): void {
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }
 
+export function cancelAllTasksForGroup(groupFolder: string): number {
+  const ids = db
+    .prepare('SELECT id FROM scheduled_tasks WHERE group_folder = ?')
+    .all(groupFolder) as { id: string }[];
+  for (const { id } of ids) {
+    db.prepare('DELETE FROM task_run_logs WHERE task_id = ?').run(id);
+  }
+  const result = db
+    .prepare('DELETE FROM scheduled_tasks WHERE group_folder = ?')
+    .run(groupFolder);
+  return result.changes;
+}
+
 export function getDueTasks(): ScheduledTask[] {
   const now = new Date().toISOString();
   return db
@@ -713,6 +735,7 @@ export function storeConversationTurn(
   groupFolder: string,
   userContent: string,
   assistantContent: string,
+  toolSummary?: string,
 ): void {
   const insert = db.prepare(
     `INSERT INTO conversation_history (group_folder, role, content) VALUES (?, ?, ?)`,
@@ -727,12 +750,15 @@ export function storeConversationTurn(
        LIMIT ?
      )`,
   );
-  const insertBoth = db.transaction(() => {
+  const insertAll = db.transaction(() => {
     insert.run(groupFolder, 'user', userContent);
+    if (toolSummary) {
+      insert.run(groupFolder, 'tool_summary', toolSummary);
+    }
     insert.run(groupFolder, 'assistant', assistantContent);
-    prune.run(groupFolder, groupFolder, CONVERSATION_HISTORY_TURNS * 2);
+    prune.run(groupFolder, groupFolder, CONVERSATION_HISTORY_TURNS * 3);
   });
-  insertBoth();
+  insertAll();
 }
 
 export function getConversationHistory(
@@ -749,8 +775,20 @@ export function getConversationHistory(
          LIMIT ?
        ) ORDER BY created_at, id`,
     )
-    .all(groupFolder, turns * 2) as Array<{ role: string; content: string }>;
-  return rows as Array<{ role: 'user' | 'assistant'; content: string }>;
+    .all(groupFolder, turns * 3) as Array<{ role: string; content: string }>;
+
+  // Skip tool_summary rows — they are kept for audit but NOT sent to the LLM
+  // (injecting them caused the model to mimic the text format instead of calling tools)
+  const result: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+
+  for (const row of rows) {
+    if (row.role === 'tool_summary') continue;
+    result.push({
+      role: row.role as 'user' | 'assistant',
+      content: row.content,
+    });
+  }
+  return result;
 }
 
 export function clearConversationHistory(groupFolder: string): void {
