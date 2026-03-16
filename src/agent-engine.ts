@@ -58,13 +58,29 @@ const BASH_TIMEOUT_MS = 30_000;
 // "digitalocean 13 mars" → "digitalocean after:2026/03/12 before:2026/03/14"
 // "edf 17 mars 2026" → "edf after:2026/03/16 before:2026/03/18"
 const FRENCH_MONTHS: Record<string, number> = {
-  janvier: 1, février: 2, fevrier: 2, mars: 3, avril: 4, mai: 5, juin: 6,
-  juillet: 7, août: 8, aout: 8, septembre: 9, octobre: 10, novembre: 11, décembre: 12, decembre: 12,
+  janvier: 1,
+  février: 2,
+  fevrier: 2,
+  mars: 3,
+  avril: 4,
+  mai: 5,
+  juin: 6,
+  juillet: 7,
+  août: 8,
+  aout: 8,
+  septembre: 9,
+  octobre: 10,
+  novembre: 11,
+  décembre: 12,
+  decembre: 12,
 };
 
 function preprocessGmailQuery(query: string): string {
   const monthPattern = Object.keys(FRENCH_MONTHS).join('|');
-  const dateRegex = new RegExp(`(\\d{1,2})\\s+(${monthPattern})(?:\\s+(\\d{4}))?`, 'i');
+  const dateRegex = new RegExp(
+    `(\\d{1,2})\\s+(${monthPattern})(?:\\s+(\\d{4}))?`,
+    'i',
+  );
   const match = query.match(dateRegex);
   if (!match) return query;
 
@@ -76,7 +92,8 @@ function preprocessGmailQuery(query: string): string {
   const before = new Date(target);
   before.setDate(before.getDate() + 1);
 
-  const fmt = (d: Date) => `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
   const cleaned = query.replace(match[0], '').trim();
   return `${cleaned} after:${fmt(target)} before:${fmt(before)}`;
 }
@@ -956,206 +973,260 @@ function buildTools(
     ...(input.isMain
       ? {
           gmailSearch: tool({
-      description:
-        'Search or list Gmail emails. Returns sender, subject, date and body preview for each result. ' +
-        'Use simple keywords to search broadly (e.g. "digitalocean" searches from, subject AND body). ' +
-        'Never invent a full email address — use just the domain or keyword. ' +
-        'Examples: "digitalocean", "is:unread", "from:amazon", "subject:facture". ' +
-        'The body preview (up to 800 chars) is included — you do NOT need to call gmailRead for basic summaries.',
-      inputSchema: z.object({
-        query: z
-          .string()
-          .default('in:inbox')
-          .describe('Gmail search query. Default: "in:inbox"'),
-        maxResults: z.number().default(5).describe('Max number of results'),
-      }),
-      execute: async ({ query: rawQuery, maxResults }) => {
-        const query = preprocessGmailQuery(rawQuery);
-        logger.info({ rawQuery, query, maxResults }, 'gmailSearch called');
-        const gmail = createGmailClient();
-        if (!gmail) return { error: 'Gmail not configured' };
-        try {
-          const list = await gmail.users.messages.list({
-            userId: 'me',
-            q: query,
-            maxResults,
-          });
-          const messages = list.data.messages || [];
-          if (messages.length === 0) return { results: [] };
-
-          const extractBody = (part: any): string => {
-            if (part.mimeType === 'text/plain' && part.body?.data) {
-              return Buffer.from(part.body.data, 'base64').toString('utf-8');
-            }
-            if (part.parts) {
-              for (const p of part.parts) {
-                const text = extractBody(p);
-                if (text) return text;
-              }
-            }
-            return '';
-          };
-
-          const results = await Promise.all(
-            messages.map(async (m) => {
-              const msg = await gmail.users.messages.get({
-                userId: 'me',
-                id: m.id!,
-                format: 'full',
-              });
-              const h = (name: string) =>
-                msg.data.payload?.headers?.find(
-                  (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
-                )?.value || '';
-              const body = extractBody(msg.data.payload || {}).slice(0, 800);
-              return {
-                id: m.id,
-                from: h('From'),
-                subject: h('Subject'),
-                date: h('Date'),
-                body: body || msg.data.snippet || '',
-              };
+            description:
+              'Search or list Gmail emails. Returns sender, subject, date and body preview for each result. ' +
+              'Use simple keywords to search broadly (e.g. "digitalocean" searches from, subject AND body). ' +
+              'Never invent a full email address — use just the domain or keyword. ' +
+              'Examples: "digitalocean", "is:unread", "from:amazon", "subject:facture". ' +
+              'The body preview (up to 800 chars) is included — you do NOT need to call gmailRead for basic summaries.',
+            inputSchema: z.object({
+              query: z
+                .string()
+                .default('in:inbox')
+                .describe('Gmail search query. Default: "in:inbox"'),
+              maxResults: z
+                .number()
+                .default(5)
+                .describe('Max number of results'),
             }),
-          );
-          logger.info({ count: results.length }, 'gmailSearch results');
-          return { results };
-        } catch (err: any) {
-          logger.error({ err: err.message }, 'gmailSearch error');
-          return { error: err.message };
-        }
-      },
-    }),
+            execute: async ({ query: rawQuery, maxResults }) => {
+              const query = preprocessGmailQuery(rawQuery);
+              logger.info(
+                { rawQuery, query, maxResults },
+                'gmailSearch called',
+              );
+              const gmail = createGmailClient();
+              if (!gmail) return { error: 'Gmail not configured' };
+              try {
+                const list = await gmail.users.messages.list({
+                  userId: 'me',
+                  q: query,
+                  maxResults,
+                });
+                const messages = list.data.messages || [];
+                if (messages.length === 0) return { results: [] };
 
-    gmailSend: tool({
-      description: 'Send a new email via Gmail.',
-      inputSchema: z.object({
-        to: z.string().describe('Recipient email address'),
-        subject: z.string().describe('Email subject'),
-        body: z.string().describe('Email body (plain text)'),
-      }),
-      execute: async ({ to, subject, body }) => {
-        const gmail = createGmailClient();
-        if (!gmail) return { error: 'Gmail not configured' };
-        logger.info({ to, subject }, 'gmailSend called');
-        try {
-          const raw = Buffer.from(
-            [
-              `To: ${to}`,
-              `Subject: ${subject}`,
-              'Content-Type: text/plain; charset=utf-8',
-              '',
-              body,
-            ].join('\r\n'),
-          )
-            .toString('base64')
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=+$/, '');
+                const extractBody = (part: any): string => {
+                  if (part.mimeType === 'text/plain' && part.body?.data) {
+                    return Buffer.from(part.body.data, 'base64').toString(
+                      'utf-8',
+                    );
+                  }
+                  if (part.parts) {
+                    for (const p of part.parts) {
+                      const text = extractBody(p);
+                      if (text) return text;
+                    }
+                  }
+                  return '';
+                };
 
-          const res = await gmail.users.messages.send({
-            userId: 'me',
-            requestBody: { raw },
-          });
-          logger.info({ to, subject, id: res.data.id }, 'gmailSend success');
-          return { success: true, to, subject };
-        } catch (err: any) {
-          logger.error({ to, subject, error: err.message }, 'gmailSend failed');
-          return { error: err.message };
-        }
-      },
-    }),
+                const results = await Promise.all(
+                  messages.map(async (m) => {
+                    const msg = await gmail.users.messages.get({
+                      userId: 'me',
+                      id: m.id!,
+                      format: 'full',
+                    });
+                    const h = (name: string) =>
+                      msg.data.payload?.headers?.find(
+                        (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
+                      )?.value || '';
+                    const body = extractBody(msg.data.payload || {}).slice(
+                      0,
+                      800,
+                    );
+                    return {
+                      id: m.id,
+                      from: h('From'),
+                      subject: h('Subject'),
+                      date: h('Date'),
+                      body: body || msg.data.snippet || '',
+                    };
+                  }),
+                );
+                logger.info({ count: results.length }, 'gmailSearch results');
+                return { results };
+              } catch (err: any) {
+                logger.error({ err: err.message }, 'gmailSearch error');
+                return { error: err.message };
+              }
+            },
+          }),
 
-    gmailDelete: tool({
-      description:
-        'Search for a Gmail email and move it to trash (recoverable for 30 days). ' +
-        'Be SPECIFIC with your keywords to match exactly one email (e.g. "edf tempo 16 mars", not just "edf"). ' +
-        'If exactly one email matches, it is trashed. ' +
-        'If multiple match, nothing is deleted — the tool returns the list so you can refine your query with more specific keywords or a date.',
-      inputSchema: z.object({
-        query: z.string().describe('Specific Gmail search keywords to identify the email to delete'),
-      }),
-      execute: async ({ query: rawQuery }) => {
-        const query = preprocessGmailQuery(rawQuery);
-        const gmail = createGmailClient();
-        if (!gmail) return { error: 'Gmail not configured' };
-        logger.info({ rawQuery, query }, 'gmailDelete called');
-        try {
-          const list = await gmail.users.messages.list({ userId: 'me', q: query, maxResults: 5 });
-          const messages = list.data.messages || [];
-          if (messages.length === 0) return { error: 'No email found matching this query.' };
-          if (messages.length > 1) {
-            const summaries = await Promise.all(
-              messages.map(async (m) => {
+          gmailSend: tool({
+            description: 'Send a new email via Gmail.',
+            inputSchema: z.object({
+              to: z.string().describe('Recipient email address'),
+              subject: z.string().describe('Email subject'),
+              body: z.string().describe('Email body (plain text)'),
+            }),
+            execute: async ({ to, subject, body }) => {
+              const gmail = createGmailClient();
+              if (!gmail) return { error: 'Gmail not configured' };
+              logger.info({ to, subject }, 'gmailSend called');
+              try {
+                const raw = Buffer.from(
+                  [
+                    `To: ${to}`,
+                    `Subject: ${subject}`,
+                    'Content-Type: text/plain; charset=utf-8',
+                    '',
+                    body,
+                  ].join('\r\n'),
+                )
+                  .toString('base64')
+                  .replace(/\+/g, '-')
+                  .replace(/\//g, '_')
+                  .replace(/=+$/, '');
+
+                const res = await gmail.users.messages.send({
+                  userId: 'me',
+                  requestBody: { raw },
+                });
+                logger.info(
+                  { to, subject, id: res.data.id },
+                  'gmailSend success',
+                );
+                return { success: true, to, subject };
+              } catch (err: any) {
+                logger.error(
+                  { to, subject, error: err.message },
+                  'gmailSend failed',
+                );
+                return { error: err.message };
+              }
+            },
+          }),
+
+          gmailDelete: tool({
+            description:
+              'Search for a Gmail email and move it to trash (recoverable for 30 days). ' +
+              'Be SPECIFIC with your keywords to match exactly one email (e.g. "edf tempo 16 mars", not just "edf"). ' +
+              'If exactly one email matches, it is trashed. ' +
+              'If multiple match, nothing is deleted — the tool returns the list so you can refine your query with more specific keywords or a date.',
+            inputSchema: z.object({
+              query: z
+                .string()
+                .describe(
+                  'Specific Gmail search keywords to identify the email to delete',
+                ),
+            }),
+            execute: async ({ query: rawQuery }) => {
+              const query = preprocessGmailQuery(rawQuery);
+              const gmail = createGmailClient();
+              if (!gmail) return { error: 'Gmail not configured' };
+              logger.info({ rawQuery, query }, 'gmailDelete called');
+              try {
+                const list = await gmail.users.messages.list({
+                  userId: 'me',
+                  q: query,
+                  maxResults: 5,
+                });
+                const messages = list.data.messages || [];
+                if (messages.length === 0)
+                  return { error: 'No email found matching this query.' };
+                if (messages.length > 1) {
+                  const summaries = await Promise.all(
+                    messages.map(async (m) => {
+                      const msg = await gmail.users.messages.get({
+                        userId: 'me',
+                        id: m.id!,
+                        format: 'metadata',
+                        metadataHeaders: ['From', 'Subject', 'Date'],
+                      });
+                      const h = (name: string) =>
+                        msg.data.payload?.headers?.find(
+                          (hdr) =>
+                            hdr.name?.toLowerCase() === name.toLowerCase(),
+                        )?.value || '';
+                      return {
+                        from: h('From'),
+                        subject: h('Subject'),
+                        date: h('Date'),
+                      };
+                    }),
+                  );
+                  return {
+                    tooMany: true,
+                    count: summaries.length,
+                    matches: summaries,
+                    hint: 'Add a date or more keywords to match exactly one email.',
+                  };
+                }
+                const id = messages[0].id!;
                 const msg = await gmail.users.messages.get({
-                  userId: 'me', id: m.id!, format: 'metadata',
+                  userId: 'me',
+                  id,
+                  format: 'metadata',
                   metadataHeaders: ['From', 'Subject', 'Date'],
                 });
                 const h = (name: string) =>
-                  msg.data.payload?.headers?.find((hdr) => hdr.name?.toLowerCase() === name.toLowerCase())?.value || '';
-                return { from: h('From'), subject: h('Subject'), date: h('Date') };
-              }),
-            );
-            return { tooMany: true, count: summaries.length, matches: summaries, hint: 'Add a date or more keywords to match exactly one email.' };
-          }
-          const id = messages[0].id!;
-          const msg = await gmail.users.messages.get({
-            userId: 'me', id, format: 'metadata',
-            metadataHeaders: ['From', 'Subject', 'Date'],
-          });
-          const h = (name: string) =>
-            msg.data.payload?.headers?.find((hdr) => hdr.name?.toLowerCase() === name.toLowerCase())?.value || '';
-          await gmail.users.messages.trash({ userId: 'me', id });
-          logger.info({ id, subject: h('Subject') }, 'gmailDelete success');
-          return { success: true, trashed: { from: h('From'), subject: h('Subject'), date: h('Date') } };
-        } catch (err: any) {
-          logger.error({ query, err: err.message }, 'gmailDelete error');
-          return { error: err.message };
-        }
-      },
-    }),
+                  msg.data.payload?.headers?.find(
+                    (hdr) => hdr.name?.toLowerCase() === name.toLowerCase(),
+                  )?.value || '';
+                await gmail.users.messages.trash({ userId: 'me', id });
+                logger.info(
+                  { id, subject: h('Subject') },
+                  'gmailDelete success',
+                );
+                return {
+                  success: true,
+                  trashed: {
+                    from: h('From'),
+                    subject: h('Subject'),
+                    date: h('Date'),
+                  },
+                };
+              } catch (err: any) {
+                logger.error({ query, err: err.message }, 'gmailDelete error');
+                return { error: err.message };
+              }
+            },
+          }),
 
-    setModel: tool({
-      description:
-        'Change the Ollama model used by this agent. Omit the model parameter to list available models. The change takes effect immediately and persists across restarts.',
-      inputSchema: z.object({
-        model: z
-          .string()
-          .optional()
-          .describe(
-            'Model name to switch to (e.g. "llama3.2:3b"). Omit to list available models.',
-          ),
-      }),
-      execute: async ({ model }) => {
-        let availableModels: string[] = [];
-        try {
-          const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
-            signal: AbortSignal.timeout(5_000),
-          });
-          const data = (await res.json()) as {
-            models?: Array<{ name: string }>;
-          };
-          availableModels = (data.models || []).map((m) => m.name);
-        } catch (err: any) {
-          return { error: `Cannot reach Ollama: ${err.message}` };
-        }
+          setModel: tool({
+            description:
+              'Change the Ollama model used by this agent. Omit the model parameter to list available models. The change takes effect immediately and persists across restarts.',
+            inputSchema: z.object({
+              model: z
+                .string()
+                .optional()
+                .describe(
+                  'Model name to switch to (e.g. "llama3.2:3b"). Omit to list available models.',
+                ),
+            }),
+            execute: async ({ model }) => {
+              let availableModels: string[] = [];
+              try {
+                const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
+                  signal: AbortSignal.timeout(5_000),
+                });
+                const data = (await res.json()) as {
+                  models?: Array<{ name: string }>;
+                };
+                availableModels = (data.models || []).map((m) => m.name);
+              } catch (err: any) {
+                return { error: `Cannot reach Ollama: ${err.message}` };
+              }
 
-        if (!model) {
-          return { currentModel, availableModels };
-        }
+              if (!model) {
+                return { currentModel, availableModels };
+              }
 
-        if (!availableModels.includes(model)) {
-          return {
-            error: `Model "${model}" not found in Ollama`,
-            availableModels,
-          };
-        }
+              if (!availableModels.includes(model)) {
+                return {
+                  error: `Model "${model}" not found in Ollama`,
+                  availableModels,
+                };
+              }
 
-        currentModel = model;
-        writeEnvFile('OLLAMA_MODEL', model);
+              currentModel = model;
+              writeEnvFile('OLLAMA_MODEL', model);
 
-        return { success: true, currentModel, availableModels };
-      },
-    }),
+              return { success: true, currentModel, availableModels };
+            },
+          }),
         }
       : {}),
   };
