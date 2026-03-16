@@ -79,6 +79,13 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+export interface AvailableGroup {
+  jid: string;
+  name: string;
+  lastActivity: string;
+  isRegistered: boolean;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

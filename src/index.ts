@@ -17,8 +17,6 @@ import {
   AgentCallbacks,
   ContainerOutput,
   runContainerAgent,
-  writeGroupsSnapshot,
-  writeTasksSnapshot,
 } from './container-runner.js';
 import {
   cleanupOrphans,
@@ -28,7 +26,6 @@ import { stopAllSandboxes } from './agent-engine.js';
 import {
   createTask,
   deleteTask,
-  cancelAllTasksForGroup,
   updateTask,
   getAllChats,
   getAllRegisteredGroups,
@@ -55,7 +52,12 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import {
+  AvailableGroup,
+  Channel,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -118,7 +120,7 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
  */
-export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
+export function getAvailableGroups(): AvailableGroup[] {
   const chats = getAllChats();
   const registeredJids = new Set(Object.keys(registeredGroups));
 
@@ -278,7 +280,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   return true;
 }
 
-function buildAgentCallbacks(chatJidForSend?: string, groupFolder?: string): AgentCallbacks {
+function buildAgentCallbacks(
+  chatJidForSend?: string,
+  groupFolder?: string,
+): AgentCallbacks {
   return {
     sendMessage: async (jid: string, text: string) => {
       const channel = findChannel(channels, jid);
@@ -342,7 +347,6 @@ function buildAgentCallbacks(chatJidForSend?: string, groupFolder?: string): Age
     getAvailableGroups,
     getAllTasks,
     deleteTask,
-    cancelAllTasks: () => cancelAllTasksForGroup(groupFolder ?? ''),
     updateTask,
     registerGroup: (
       jid: string,
@@ -369,31 +373,6 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-
-  // Update tasks snapshot (IPC watcher still uses these files)
-  const tasks = getAllTasks();
-  writeTasksSnapshot(
-    group.folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
-
-  // Update available groups snapshot
-  const availableGroups = getAvailableGroups();
-  writeGroupsSnapshot(
-    group.folder,
-    isMain,
-    availableGroups,
-    new Set(Object.keys(registeredGroups)),
-  );
 
   try {
     const output = await runContainerAgent(
@@ -650,9 +629,6 @@ async function main(): Promise<void> {
           .map((ch) => ch.syncGroups!(force)),
       );
     },
-    getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) =>
-      writeGroupsSnapshot(gf, im, ag, rj),
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

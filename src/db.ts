@@ -135,9 +135,7 @@ function createSchema(database: Database.Database): void {
 
   // Add tool_data column to conversation_history (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE conversation_history ADD COLUMN tool_data TEXT`,
-    );
+    database.exec(`ALTER TABLE conversation_history ADD COLUMN tool_data TEXT`);
   } catch {
     /* column already exists */
   }

@@ -7,10 +7,8 @@ import {
   AgentCallbacks,
   ContainerOutput,
   runContainerAgent,
-  writeTasksSnapshot,
 } from './container-runner.js';
 import {
-  cancelAllTasksForGroup,
   getAllTasks,
   getDueTasks,
   getTaskById,
@@ -131,22 +129,7 @@ async function runTask(
     return;
   }
 
-  // Update tasks snapshot for container to read (filtered by group)
   const isMain = group.isMain === true;
-  const tasks = getAllTasks();
-  writeTasksSnapshot(
-    task.group_folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
 
   let result: string | null = null;
   let error: string | null = null;
@@ -195,10 +178,7 @@ async function runTask(
           error = streamedOutput.error || 'Unknown error';
         }
       },
-      {
-        ...deps.agentCallbacks,
-        cancelAllTasks: () => cancelAllTasksForGroup(task.group_folder),
-      },
+      deps.agentCallbacks,
     );
 
     if (closeTimer) clearTimeout(closeTimer);
