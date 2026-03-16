@@ -1271,8 +1271,9 @@ function buildTools(
       : {}),
   };
 
-  // Scheduled tasks: strip tools that manage tasks or system config
-  // to prevent cascading task creation and uncontrolled modifications.
+  // Scheduled tasks: strip tools that manage tasks, system config,
+  // or destructive/irreversible actions (sending emails, deleting emails)
+  // to prevent cascading task creation and uncontrolled autonomous actions.
   if (input.isScheduledTask) {
     delete tools.scheduleTask;
     delete tools.deleteTask;
@@ -1281,6 +1282,8 @@ function buildTools(
     delete tools.clearHistory;
     delete tools.registerGroup;
     delete tools.setModel;
+    delete tools.gmailSend;
+    delete tools.gmailDelete;
   }
 
   return tools;

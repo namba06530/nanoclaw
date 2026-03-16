@@ -6,7 +6,7 @@ Personal assistant powered by Ollama (local LLM). See [README.md](README.md) for
 
 Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to an Ollama agent engine (Vercel AI SDK) running on the host with GPU access. Bash/file tools execute via `docker exec` into a minimal per-group Ubuntu sandbox container for isolation. Each group has isolated filesystem and memory.
 
-**Engine:** Ollama (`mistral-small3.2:24b` selected after benchmark, configurable via `OLLAMA_MODEL` in `.env`)
+**Engine:** Ollama (`gpt-oss:latest` 20.9B selected after benchmark, configurable via `OLLAMA_MODEL` in `.env`)
 **Sandbox:** `nanoclaw-agent:latest` — Ubuntu 24.04 minimal, `sleep infinity`, no Node.js/Chromium
 
 ## Key Files
@@ -95,14 +95,14 @@ Le system prompt de l'agent est construit en couches dans `buildSystemPrompt()` 
 - Anti-boucle : max 3 tool calls sans résultat → stop et demande à l'utilisateur
 - Jamais le même type de tool 2+ fois de suite
 
-**Sécurité tâches planifiées** : quand `isScheduledTask=true`, les tools de gestion (scheduleTask, deleteTask, cancelAllTasks, updateTask, clearHistory, registerGroup, setModel) sont retirés pour empêcher les cascades.
+**Sécurité tâches planifiées** : quand `isScheduledTask=true`, les tools de gestion (scheduleTask, deleteTask, cancelAllTasks, updateTask, clearHistory, registerGroup, setModel) et les tools destructifs/irréversibles (gmailSend, gmailDelete) sont retirés pour empêcher les cascades et les actions autonomes non contrôlées.
 
 ## Configuration (.env)
 
 ```
 ASSISTANT_NAME=Oliv
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=mistral-small3.2:24b
+OLLAMA_MODEL=gpt-oss:latest
 AGENT_MAX_STEPS=15
 TELEGRAM_BOT_TOKEN=...
 ```
